@@ -94,6 +94,10 @@ AUDIO_BITRATE=128k
 YOUTUBE_COOKIES_ENABLED=true
 COOKIES_PATH=cookies.txt
 
+# Proxy (ixtiyoriy — bo'sh qoldirilsa proxy ishlatilmaydi)
+# Formatlar: http://host:port  |  socks5://user:pass@host:port
+PROXY_URL=
+
 # Database
 DB_PATH=database.db
 ```
@@ -168,6 +172,10 @@ YOUTUBE_COOKIES_ENABLED = true
 COOKIES_PATH     = /app/cookies.txt
 VIDEO_CRF        = 28
 DB_PATH          = database.db
+
+# Ixtiyoriy — proxy (bo'sh qoldirilsa ishlatilmaydi)
+# Formatlar: http://host:port  |  socks5://user:pass@host:port
+PROXY_URL        =
 ```
 
 ### 3-qadam: Cookies.txt ni Railway'ga yuklash

@@ -44,5 +44,14 @@ YOUTUBE_COOKIES_ENABLED: bool = os.getenv("YOUTUBE_COOKIES_ENABLED", "true").low
 )
 COOKIES_PATH: str = os.getenv("COOKIES_PATH", "cookies.txt")
 
+# ── Proxy ────────────────────────────────────────────────
+# Ixtiyoriy — bo'sh qoldirilsa proxy ishlatilmaydi.
+# Formatlar:
+#   http://host:port
+#   http://user:pass@host:port
+#   socks5://user:pass@host:port
+# Proxy ishlamasa bot avtomatik proxysiz qayta urinadi.
+PROXY_URL: str = os.getenv("PROXY_URL", "").strip()
+
 # ── Ma'lumotlar bazasi ────────────────────────────────────
 DB_PATH: str = os.getenv("DB_PATH", "database.db")
