@@ -3,6 +3,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import CHANNEL_URL
 
 
+# ── Obuna ─────────────────────────────────────────────────
+
 def subscription_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(InlineKeyboardButton(text="📢 Kanalga obuna bo'lish", url=CHANNEL_URL))
@@ -10,15 +12,19 @@ def subscription_keyboard() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+# ── Asosiy menyu ──────────────────────────────────────────
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
         InlineKeyboardButton(text="🎥 Video yuklash", callback_data="download_video"),
-        InlineKeyboardButton(text="🎵 MP3 yuklash", callback_data="download_audio"),
+        InlineKeyboardButton(text="🎵 MP3 yuklash",   callback_data="download_audio"),
     )
     kb.row(InlineKeyboardButton(text="ℹ️ Yordam", callback_data="help"))
     return kb.as_markup()
 
+
+# ── Umumiy yordamchi ──────────────────────────────────────
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
@@ -38,9 +44,27 @@ def back_keyboard(target: str = "main_menu") -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+# ── Admin panel ───────────────────────────────────────────
+
 def admin_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.row(InlineKeyboardButton(text="📊 Statistika", callback_data="admin_stats"))
-    kb.row(InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"))
-    kb.row(InlineKeyboardButton(text="◀️ Chiqish", callback_data="main_menu"))
+    kb.row(
+        InlineKeyboardButton(text="📊 Statistika",       callback_data="admin_stats"),
+        InlineKeyboardButton(text="📋 So'nggi yuklamalar", callback_data="admin_last10"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="🏆 Top foydalanuvchilar", callback_data="admin_top10"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="📢 Broadcast", callback_data="admin_broadcast"),
+    )
+    kb.row(
+        InlineKeyboardButton(text="◀️ Chiqish", callback_data="main_menu"),
+    )
+    return kb.as_markup()
+
+
+def admin_back_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(InlineKeyboardButton(text="◀️ Admin panel", callback_data="admin_panel"))
     return kb.as_markup()
