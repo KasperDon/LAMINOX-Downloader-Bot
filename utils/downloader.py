@@ -299,12 +299,7 @@ def _build_opts(client: str, proxy: str | None = None) -> dict:
         "sleep_interval_requests": 0,
         "http_headers":         _HEADERS,
         "extractor_args": {
-            "youtube": {
-                "player_client": [client],
-                # webpage yuklab olishni o'tkazib yuboramiz — bu bot detection triggerini kamaytiradi.
-                # tv_embedded/tv clientlar uchun ayniqsa foydali.
-                "player_skip": ["webpage"],
-            },
+            "youtube": {"player_client": [client]},
         },
     }
     opts.update(_cookie_opts())
