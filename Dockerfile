@@ -15,10 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Qolgan kod
 COPY . .
 
-# yt-dlp ni har deploy vaqtida yangilaymiz (YouTube tez-tez o'zgaradi)
-# Bu qadam COPY . . dan keyin keladi — har yangi commit'da ishga tushadi
-RUN pip install --no-cache-dir --upgrade yt-dlp
-
 # Ishlash papkalarini yaratish
 RUN mkdir -p downloads logs
 
@@ -28,4 +24,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
     TZ=Asia/Tashkent
 
-CMD ["python", "bot.py"]
+# yt-dlp YouTube tez-tez o'zgaradi — har container ishga tushganda yangilaymiz.
+# Build vaqtida emas, RUNTIME'da yangilanadi → har doim eng yangi versiya.
+CMD ["sh", "-c", "pip install --upgrade --quiet yt-dlp && echo '✅ yt-dlp yangilandi' && python bot.py"]
