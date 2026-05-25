@@ -56,12 +56,14 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────
 
 _YOUTUBE_PLAYER_CLIENTS: list[str] = [
-    "default",
-    "web",
-    "web_safari",
-    "web_embedded",
-    "android",
-    "ios",
+    # 2025: YouTube web clientlari PO token talab qiladi.
+    # ios / android / mweb / tv_embedded — PO tokensiz ishlaydi (eng ishonchli).
+    "ios",          # ✅ PO token kerak emas — eng ishonchli
+    "android",      # ✅ PO token kerak emas
+    "mweb",         # ✅ Mobil veb
+    "tv_embedded",  # ✅ TV embedded — cheklovlarni chetlab o'tadi
+    "web",          # ⚠️  PO token kerak (cookies yordam berishi mumkin)
+    "default",      # yt-dlp ichki tanlov
 ]
 
 # ──────────────────────────────────────────────────────────
@@ -114,13 +116,20 @@ def detect_platform(url: str) -> str:
 # ──────────────────────────────────────────────────────────
 
 QUALITY_PRESETS: list[tuple[str, str]] = [
+    # Format izoh:
+    #   bestvideo+bestaudio  — alohida video+audio (merge kerak, FFmpeg bor)
+    #   best[height<=Xp]     — birlashtirilgan stream (iOS/Android HLS uchun ideal)
+    #   best                 — oxirgi fallback, istalgan format
     (
         "720p",
         (
             "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
+            "/bestvideo[ext=mp4][height<=720]+bestaudio"
+            "/bestvideo[height<=720]+bestaudio[ext=m4a]"
             "/bestvideo[height<=720]+bestaudio"
             "/best[ext=mp4][height<=720]"
             "/best[height<=720]"
+            "/bestvideo+bestaudio"
             "/best"
         ),
     ),
@@ -128,9 +137,12 @@ QUALITY_PRESETS: list[tuple[str, str]] = [
         "480p",
         (
             "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]"
+            "/bestvideo[ext=mp4][height<=480]+bestaudio"
+            "/bestvideo[height<=480]+bestaudio[ext=m4a]"
             "/bestvideo[height<=480]+bestaudio"
             "/best[ext=mp4][height<=480]"
             "/best[height<=480]"
+            "/bestvideo+bestaudio"
             "/best"
         ),
     ),
@@ -138,9 +150,12 @@ QUALITY_PRESETS: list[tuple[str, str]] = [
         "360p",
         (
             "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]"
+            "/bestvideo[ext=mp4][height<=360]+bestaudio"
+            "/bestvideo[height<=360]+bestaudio[ext=m4a]"
             "/bestvideo[height<=360]+bestaudio"
             "/best[ext=mp4][height<=360]"
             "/best[height<=360]"
+            "/bestvideo+bestaudio"
             "/best"
         ),
     ),
@@ -174,6 +189,11 @@ _PLAYER_RESPONSE_KEYWORDS = (
     "unable to extract",
     "nsig extraction failed",
     "sign in to watch",
+    "po token",              # 2025: Proof of Origin token xatosi
+    "proof of origin",       # PO token
+    "this video is unavailable",
+    "playback on other websites",
+    "sabotaged",             # YouTube sabotaj aniqlash
 )
 
 # Proxy xatolari — proxy ishlamasa proxysiz qayta uriniladi
@@ -269,28 +289,33 @@ def _build_opts(client: str, proxy: str | None = None) -> dict:
     """
     opts: dict = {
         # ── Umumiy ──────────────────────────────────────────
-        "quiet":               True,
-        "no_warnings":         True,
-        "socket_timeout":      60,
-        "nocheckcertificate":  True,   # SSL sertifikat tekshiruvini o'chirish
-        "geo_bypass":          True,   # Geo-bloklarni bypass qilish
-        "extract_flat":        False,
-        "skip_download":       False,
+        "quiet":                True,
+        "no_warnings":          True,
+        "socket_timeout":       60,
+        "nocheckcertificate":   True,   # SSL sertifikat tekshiruvini o'chirish
+        "geo_bypass":           True,   # Geo-bloklarni bypass qilish
+        "extract_flat":         False,
+        "skip_download":        False,
+        "prefer_free_formats":  False,  # MP4 ni WebM dan afzal ko'r
+        "check_formats":        "selected",  # Faqat tanlangan formatni tekshir
 
         # ── Retry ────────────────────────────────────────────
-        "retries":             5,
-        "fragment_retries":    5,
-        "file_access_retries": 3,
+        "retries":              5,
+        "fragment_retries":     10,
+        "file_access_retries":  3,
+        "extractor_retries":    3,      # Extractor xatosida qayta urinish
 
         # ── Anti-bot pauza ───────────────────────────────────
-        "sleep_interval":          1,
-        "max_sleep_interval":      3,
-        "sleep_interval_requests": 1,
+        "sleep_interval":           1,
+        "max_sleep_interval":       3,
+        "sleep_interval_requests":  1,
 
         # ── Brauzer sarlavhalari ──────────────────────────────
         "http_headers": _HEADERS,
 
-        # ── YouTube player_client (faqat bitta sinaydi) ───────
+        # ── YouTube player_client ─────────────────────────────
+        # Har bir client alohida yt-dlp instance'da sinab ko'riladi.
+        # ios/android/mweb: PO token talab qilmaydi (2025 uchun eng ishonchli).
         "extractor_args": {
             "youtube": {
                 "player_client": [client],

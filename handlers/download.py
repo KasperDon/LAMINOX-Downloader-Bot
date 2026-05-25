@@ -245,12 +245,14 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
     except YouTubePlayerError:
         logger.warning(f"YouTube player xatosi [{platform}]: barcha client'lar muvaffaqiyatsiz")
         await status.edit_text(
-            "⚠️ <b>Ushbu YouTube video hozir yuklanmadi!</b>\n\n"
-            "YouTube server javob bermadi (barcha format urinishlari muvaffaqiyatsiz).\n\n"
+            "⚠️ <b>YouTube video yuklanmadi!</b>\n\n"
+            "YouTube hozir bu videoga kirishni cheklamoqda.\n\n"
             "📌 Nima qilish mumkin:\n"
-            "• Boshqa <b>YouTube</b> linkni sinab ko'ring\n"
-            "• <b>Instagram</b> yoki <b>TikTok</b> link yuboring\n"
-            "• Bir necha daqiqadan so'ng qayta urinib ko'ring",
+            "• Linkni tekshiring — video <b>ochiq (public)</b> bo'lishi kerak\n"
+            "• Boshqa YouTube linkni sinab ko'ring\n"
+            "• <b>Shorts</b> link bo'lsa — to'liq URL yuboring\n"
+            "• 1-2 daqiqadan so'ng qayta urinib ko'ring\n"
+            "• <b>Instagram</b> yoki <b>TikTok</b> link ham yuborishingiz mumkin",
             reply_markup=main_menu_keyboard(),
         )
     except YouTubeAuthError:
@@ -332,12 +334,13 @@ async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
 
     except YouTubePlayerError:
         await status.edit_text(
-            "⚠️ <b>Ushbu YouTube audio hozir yuklanmadi!</b>\n\n"
-            "YouTube server javob bermadi (barcha format urinishlari muvaffaqiyatsiz).\n\n"
+            "⚠️ <b>YouTube audio yuklanmadi!</b>\n\n"
+            "YouTube hozir bu videoga kirishni cheklamoqda.\n\n"
             "📌 Nima qilish mumkin:\n"
-            "• Boshqa <b>YouTube</b> linkni sinab ko'ring\n"
-            "• <b>Instagram</b> yoki <b>TikTok</b> link yuboring\n"
-            "• Bir necha daqiqadan so'ng qayta urinib ko'ring",
+            "• Linkni tekshiring — video <b>ochiq (public)</b> bo'lishi kerak\n"
+            "• Boshqa YouTube linkni sinab ko'ring\n"
+            "• 1-2 daqiqadan so'ng qayta urinib ko'ring\n"
+            "• <b>Instagram</b> yoki <b>TikTok</b> link ham yuborishingiz mumkin",
             reply_markup=main_menu_keyboard(),
         )
     except YouTubeAuthError:

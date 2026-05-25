@@ -21,6 +21,8 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.storage.memory import MemoryStorage
 
+import yt_dlp
+
 from config import BOT_TOKEN, COOKIES_PATH, YOUTUBE_COOKIES_ENABLED
 from handlers import admin, download, start
 from utils.database import init_db
@@ -51,6 +53,9 @@ def _startup_checks() -> None:
     if not BOT_TOKEN:
         logger.critical("BOT_TOKEN topilmadi! .env faylini tekshiring.")
         sys.exit(1)
+
+    # yt-dlp versiyasi
+    logger.info(f"📦 yt-dlp versiya: {yt_dlp.version.__version__}")
 
     # Cookies holati
     if YOUTUBE_COOKIES_ENABLED:
