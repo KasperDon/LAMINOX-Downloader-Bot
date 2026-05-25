@@ -99,16 +99,19 @@ _ADAPTIVE_VIDEO_ITAGS: dict[int, int] = {
 # YouTube player_client (yt-dlp fallback uchun)
 # ──────────────────────────────────────────────────────────
 
+# MUHIM: tv_embedded va tv — PO token talab qilmaydi, bot detection aylanib o'tadi.
+# Shu ikkisi birinchi — ko'p cheklangan videolarda ishlaydi.
 _YOUTUBE_PLAYER_CLIENTS: list[str] = [
-    "ios",           # PO token kerak emas
-    "android",       # PO token kerak emas
-    "web_creator",   # YouTube Studio client
-    "android_vr",    # VR client
-    "mweb",          # Mobil veb
-    "tv_embedded",   # TV embedded
+    "tv_embedded",       # 1: TV embedded — PO token kerak emas, cheklangan videoları ham
+    "tv",                # 2: TV Sapphire — PO token kerak emas
+    "ios",               # 3: iOS client — PO token kerak emas
+    "android",           # 4: Android
+    "web_creator",       # 5: YouTube Studio client
+    "android_vr",        # 6: VR client
+    "mweb",              # 7: Mobil veb
 ]
 
-_CLIENT_TIMEOUT_SEC = 60
+_CLIENT_TIMEOUT_SEC = 90  # har bir client uchun (sekundda)
 
 # ──────────────────────────────────────────────────────────
 # Brauzer sarlavhalari
@@ -296,7 +299,12 @@ def _build_opts(client: str, proxy: str | None = None) -> dict:
         "sleep_interval_requests": 0,
         "http_headers":         _HEADERS,
         "extractor_args": {
-            "youtube": {"player_client": [client]},
+            "youtube": {
+                "player_client": [client],
+                # webpage yuklab olishni o'tkazib yuboramiz — bu bot detection triggerini kamaytiradi.
+                # tv_embedded/tv clientlar uchun ayniqsa foydali.
+                "player_skip": ["webpage"],
+            },
         },
     }
     opts.update(_cookie_opts())
@@ -377,8 +385,11 @@ async def _invidious_video(video_id: str, max_height: int) -> str:
             )
             logger.info(f"[Invidious] {instance} → {video_id} (max {max_height}p)")
 
-            # PROXY_URL orqali so'rov — Railway IP bloki aylanib o'tiladi
-            _api_proxy = PROXY_URL or None
+            # Invidious'ga proxy OLMADAN urinish — Invidious o'zi YouTube'dan oladi,
+            # bizning IP faqat Invidious serveriga etadi. Webshare IP'lari ba'zan
+            # Invidious operatorlari tomonidan bloklanishi mumkin.
+            # Agar proxy'siz 403/401 → keyingi instance'ga o'tamiz.
+            _api_proxy = None
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20)
             ) as session:
@@ -582,7 +593,8 @@ async def _invidious_audio(video_id: str, bitrate: str) -> str:
             api_url = f"{instance}/api/v1/videos/{video_id}?fields=adaptiveFormats"
             logger.info(f"[Invidious audio] {instance} → {video_id}")
 
-            _api_proxy = PROXY_URL or None
+            # Proxy olmadan — Invidious serveri YouTube'ga o'zi murojaat qiladi.
+            _api_proxy = None
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as session:
