@@ -45,15 +45,23 @@ logger = logging.getLogger(__name__)
 # Invidious instance'lari (bot detection yo'q)
 # ──────────────────────────────────────────────────────────
 
+# api.invidious.io/instances.json?sort_by=health dan olingan (health > 0.8)
 INVIDIOUS_INSTANCES: list[str] = [
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de",
-    "https://invidious.private.coffee",
-    "https://inv.tux.pizza",
-    "https://invidious.incogniweb.net",
-    "https://inv.bp.projectsegfau.lt",
-    "https://invidious.no-logs.com",
-    "https://yt.drgnz.club",
+    "https://inv.nadeko.net",           # Chile         – health 0.99
+    "https://invidious.nerdvpn.de",     # Germany       – health 0.97
+    "https://yt.chocolatemoo53.com",    # US            – health 0.95
+    "https://invidious.f5.si",          # EU            – health 0.92
+    "https://inv.thepixora.com",        # EU            – health 0.88
+    "https://invidious.private.coffee", # Austria       – fallback
+]
+
+# Piped API instance'lari (teampiped.github.io/Piped-Frontend/Instances)
+PIPED_INSTANCES: list[str] = [
+    "https://api.piped.private.coffee",
+    "https://pipedapi.kavin.rocks",
+    "https://api.piped.yt",
+    "https://api.piped.privacydev.net",
+    "https://piped-api.garudalinux.org",
 ]
 
 # Progressive stream itag → balandlik (audio+video birlashtirilgan, merge kerak emas)
@@ -359,6 +367,12 @@ async def _invidious_video(video_id: str, max_height: int) -> str:
                 async with session.get(api_url) as resp:
                     if resp.status != 200:
                         logger.warning(f"[Invidious] {instance}: HTTP {resp.status}")
+                        continue
+                    ct = resp.headers.get("Content-Type", "")
+                    if "json" not in ct.lower():
+                        logger.warning(
+                            f"[Invidious] {instance}: JSON kutildi, lekin '{ct}' keldi"
+                        )
                         continue
                     data = await resp.json()
 
@@ -839,6 +853,183 @@ async def _audio_per_client(url: str, bitrate_num: str, proxy: str | None) -> st
 
 
 # ──────────────────────────────────────────────────────────
+# Piped API: YouTube video yuklab olish (Invidious alternativa)
+# ──────────────────────────────────────────────────────────
+
+def _piped_height(s: dict) -> int:
+    """Piped stream ob'ektidan piksel balandligini ajratadi."""
+    h = s.get("height", 0)
+    if h:
+        try:
+            return int(h)
+        except (TypeError, ValueError):
+            pass
+    m = re.match(r"(\d+)p", s.get("quality", ""))
+    return int(m.group(1)) if m else 0
+
+
+async def _piped_video(video_id: str, max_height: int) -> str:
+    """
+    Piped API orqali YouTube video yuklab oladi.
+
+    Piped — Invidious'ga o'xshash, lekin boshqa infratuzilma.
+    /streams/{id} endpointi videoStreams + audioStreams qaytaradi.
+    Barcha streamlar video-only (adaptive) — FFmpeg merge kerak.
+    """
+    for instance in PIPED_INSTANCES:
+        try:
+            api_url = f"{instance}/streams/{video_id}"
+            logger.info(f"[Piped] {instance} → {video_id} (max {max_height}p)")
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as session:
+                async with session.get(api_url) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"[Piped] {instance}: HTTP {resp.status}")
+                        continue
+                    ct = resp.headers.get("Content-Type", "")
+                    if "json" not in ct.lower():
+                        logger.warning(
+                            f"[Piped] {instance}: JSON kutildi, lekin '{ct}' keldi"
+                        )
+                        continue
+                    data = await resp.json()
+
+            if "error" in data:
+                logger.warning(f"[Piped] {instance}: API xatosi → {data['error']}")
+                continue
+
+            video_streams = data.get("videoStreams", [])
+            audio_streams = data.get("audioStreams", [])
+            logger.info(
+                f"[Piped] {instance}: "
+                f"videoStreams={len(video_streams)}, audioStreams={len(audio_streams)}"
+            )
+
+            # ── Eng yaxshi video stream (mp4, ≤ max_height) ──────────────
+            mp4_videos = [
+                s for s in video_streams
+                if "mp4" in s.get("mimeType", "").lower()
+                and s.get("videoOnly", True)
+                and 0 < _piped_height(s) <= max_height
+            ]
+            mp4_videos.sort(key=_piped_height, reverse=True)
+
+            if not mp4_videos:
+                # Istalgan format bo'lsa ham sinab ko'ramiz
+                all_videos = [
+                    s for s in video_streams
+                    if s.get("videoOnly", True)
+                    and 0 < _piped_height(s) <= max_height
+                ]
+                all_videos.sort(key=_piped_height, reverse=True)
+                best_vid = all_videos[0] if all_videos else None
+            else:
+                best_vid = mp4_videos[0]
+
+            # ── Eng yaxshi audio stream (m4a/mp4 birinchi) ───────────────
+            mp4_audio = [
+                s for s in audio_streams
+                if "mp4" in s.get("mimeType", "").lower()
+            ]
+            best_aud = (
+                mp4_audio[0] if mp4_audio
+                else (audio_streams[0] if audio_streams else None)
+            )
+
+            if not best_vid or not best_aud:
+                v_str = "ok" if best_vid else "yoq"
+                a_str = "ok" if best_aud else "yoq"
+                logger.warning(
+                    f"[Piped] {instance}: stream topilmadi "
+                    f"(video={v_str}, audio={a_str})"
+                )
+                continue
+
+            vid_url = best_vid.get("url", "")
+            aud_url = best_aud.get("url", "")
+            if not vid_url or not aud_url:
+                logger.warning(f"[Piped] {instance}: URL bo'sh")
+                continue
+
+            fid     = uuid.uuid4().hex[:10]
+            vid_tmp = os.path.join(DOWNLOAD_PATH, f"vid_{fid}_v.mp4")
+            aud_tmp = os.path.join(DOWNLOAD_PATH, f"vid_{fid}_a.m4a")
+            out     = os.path.join(DOWNLOAD_PATH, f"vid_{fid}.mp4")
+            os.makedirs(DOWNLOAD_PATH, exist_ok=True)
+
+            h = _piped_height(best_vid)
+            logger.info(f"[Piped] {h}p yuklanmoqda ({instance})...")
+
+            dl_timeout = aiohttp.ClientTimeout(total=300, sock_read=120)
+            async with aiohttp.ClientSession(timeout=dl_timeout) as session:
+                vid_ok = await _download_stream(session, vid_url, vid_tmp)
+                aud_ok = await _download_stream(session, aud_url, aud_tmp)
+
+            if not vid_ok or not aud_ok:
+                logger.warning(
+                    f"[Piped] stream yuklab olish xatosi "
+                    f"(video={'ok' if vid_ok else 'fail'}, "
+                    f"audio={'ok' if aud_ok else 'fail'})"
+                )
+                for p in (vid_tmp, aud_tmp):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                continue
+
+            # FFmpeg bilan birlashtirish
+            logger.info("[Piped] FFmpeg merge qilinmoqda...")
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-i", vid_tmp, "-i", aud_tmp,
+                "-c:v", "copy", "-c:a", "copy",
+                "-movflags", "+faststart",
+                "-y", out,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.warning("[Piped] FFmpeg timeout")
+                for p in (vid_tmp, aud_tmp, out):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                continue
+            finally:
+                for p in (vid_tmp, aud_tmp):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+
+            size = os.path.getsize(out) if os.path.exists(out) else 0
+            if size > 50_000:
+                logger.info(f"✅ [Piped] {size // 1024} KB")
+                return out
+
+            try:
+                os.remove(out)
+            except Exception:
+                pass
+
+        except asyncio.TimeoutError:
+            logger.warning(f"[Piped] {instance}: timeout")
+        except Exception as exc:
+            logger.warning(f"[Piped] {instance}: {type(exc).__name__}: {exc}")
+
+    raise YouTubePlayerError(
+        f"Barcha Piped instance'lar muvaffaqiyatsiz ({video_id})"
+    )
+
+
+# ──────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────
 
@@ -852,7 +1043,7 @@ async def download_raw_video(url: str, fmt: str) -> str:
     os.makedirs(DOWNLOAD_PATH, exist_ok=True)
     platform = detect_platform(url)
 
-    # ── YouTube: Invidious birinchi ──────────────────────
+    # ── YouTube: Invidious → Piped → yt-dlp ─────────────
     if platform == "youtube":
         video_id = _extract_youtube_id(url)
         if video_id:
@@ -862,69 +1053,17 @@ async def download_raw_video(url: str, fmt: str) -> str:
             try:
                 return await _invidious_video(video_id, max_height)
             except YouTubePlayerError:
-                logger.info("[Invidious API] muvaffaqiyatsiz → yt-dlp+Invidious URL...")
+                logger.info("[Invidious] muvaffaqiyatsiz → Piped API...")
             except Exception as exc:
-                logger.warning(f"[Invidious API] xato: {exc}")
+                logger.warning(f"[Invidious] xato: {exc} → Piped API...")
 
-            # 2-urinish: yt-dlp + Invidious URL (yt-dlp Invidious extractorini ishlatadi)
-            for inv_instance in INVIDIOUS_INSTANCES:
-                inv_url = f"{inv_instance}/watch?v={video_id}"
-                fid     = uuid.uuid4().hex[:10]
-                prefix  = f"vid_{fid}"
-                tpl     = os.path.join(DOWNLOAD_PATH, f"{prefix}.%(ext)s")
-
-                ytdlp_opts = {
-                    "quiet": True, "no_warnings": True,
-                    "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-                    "outtmpl": tpl, "merge_output_format": "mp4",
-                    "socket_timeout": 30, "retries": 2,
-                    "nocheckcertificate": True,
-                    "sleep_interval": 0, "max_sleep_interval": 0,
-                }
-
-                result: dict = {"path": None, "error": None}
-                logger.info(f"[Invidious yt-dlp] {inv_instance} → {video_id}")
-
-                def _run_inv(_o=ytdlp_opts, _r=result, _u=inv_url) -> None:
-                    try:
-                        with yt_dlp.YoutubeDL(_o) as ydl:
-                            info = ydl.extract_info(_u, download=True)
-                            if info:
-                                raw  = ydl.prepare_filename(info)
-                                base = os.path.splitext(raw)[0]
-                                mp4  = base + ".mp4"
-                                if os.path.exists(mp4):
-                                    _r["path"] = mp4
-                    except Exception as exc:
-                        _r["error"] = str(exc)
-
-                loop = asyncio.get_running_loop()
-                try:
-                    await asyncio.wait_for(
-                        loop.run_in_executor(None, _run_inv),
-                        timeout=90.0,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"[Invidious yt-dlp] {inv_instance}: 90s timeout")
-                    _cleanup_prefix(DOWNLOAD_PATH, prefix)
-                    continue
-
-                if result["path"] and os.path.exists(result["path"]):
-                    logger.info(f"✅ [Invidious yt-dlp] {inv_instance}")
-                    return result["path"]
-
-                found = _find_output_file(DOWNLOAD_PATH, prefix)
-                if found:
-                    logger.info(f"✅ [Invidious yt-dlp] {inv_instance} (found)")
-                    return found
-
-                if result["error"]:
-                    logger.debug(
-                        f"[Invidious yt-dlp] {inv_instance}: {result['error'][:80]}"
-                    )
-                _cleanup_prefix(DOWNLOAD_PATH, prefix)
-
-            logger.info("[Invidious yt-dlp] hammasi muvaffaqiyatsiz → yt-dlp YouTube URL...")
+            # 2-urinish: Piped API (boshqa infratuzilma, Invidious'dan mustaqil)
+            try:
+                return await _piped_video(video_id, max_height)
+            except YouTubePlayerError:
+                logger.info("[Piped] muvaffaqiyatsiz → yt-dlp...")
+            except Exception as exc:
+                logger.warning(f"[Piped] xato: {exc} → yt-dlp...")
 
     # ── yt-dlp (Instagram/TikTok asosiy, YouTube oxirgi fallback) ──
     if PROXY_URL:
