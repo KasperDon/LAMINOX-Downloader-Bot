@@ -41,9 +41,13 @@ async def main() -> None:
 
     dp = Dispatcher(storage=MemoryStorage())
 
-    dp.include_router(start.router)
-    dp.include_router(download.router)
+    # ❗ TARTIB MUHIM:
+    # 1. admin   — /admin, /stats, /broadcast komandalar
+    # 2. download — URL handleri va FSM states (catch-all dan OLDIN bo'lishi shart)
+    # 3. start   — /start + @router.message() catch-all (HAR DOIM OXIRGI)
     dp.include_router(admin.router)
+    dp.include_router(download.router)
+    dp.include_router(start.router)
 
     bot_info = await bot.get_me()
     logger.info(f"Bot ishga tushdi: @{bot_info.username} ({bot_info.id})")

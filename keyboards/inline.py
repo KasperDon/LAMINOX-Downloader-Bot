@@ -24,6 +24,19 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+# ── Format tanlash (to'g'ridan-to'g'ri link yuborilganda) ─
+
+def format_choice_keyboard() -> InlineKeyboardMarkup:
+    """URL to'g'ridan-to'g'ri yuborilganda format so'rash."""
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        InlineKeyboardButton(text="🎥 Video (MP4)", callback_data="fmt_video"),
+        InlineKeyboardButton(text="🎵 Audio (MP3)", callback_data="fmt_audio"),
+    )
+    kb.row(InlineKeyboardButton(text="❌ Bekor qilish", callback_data="cancel"))
+    return kb.as_markup()
+
+
 # ── Umumiy yordamchi ──────────────────────────────────────
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
@@ -49,7 +62,7 @@ def back_keyboard(target: str = "main_menu") -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.row(
-        InlineKeyboardButton(text="📊 Statistika",       callback_data="admin_stats"),
+        InlineKeyboardButton(text="📊 Statistika",         callback_data="admin_stats"),
         InlineKeyboardButton(text="📋 So'nggi yuklamalar", callback_data="admin_last10"),
     )
     kb.row(
