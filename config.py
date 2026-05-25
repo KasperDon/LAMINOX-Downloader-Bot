@@ -35,5 +35,14 @@ VIDEO_CRF: int = int(os.getenv("VIDEO_CRF", "28"))
 VIDEO_AUDIO_BITRATE: str = os.getenv("VIDEO_AUDIO_BITRATE", "128k")
 AUDIO_BITRATE: str = os.getenv("AUDIO_BITRATE", "128k")
 
+# ── YouTube Cookie ────────────────────────────────────────
+# "Sign in to confirm you're not a bot" xatoligidan himoya
+# YOUTUBE_COOKIES_ENABLED=true → cookies.txt fayli ishlatiladi
+# COOKIES_PATH → cookies.txt joylashuvi (standart: loyiha ildizi)
+YOUTUBE_COOKIES_ENABLED: bool = os.getenv("YOUTUBE_COOKIES_ENABLED", "true").lower() in (
+    "1", "true", "yes"
+)
+COOKIES_PATH: str = os.getenv("COOKIES_PATH", "cookies.txt")
+
 # ── Ma'lumotlar bazasi ────────────────────────────────────
 DB_PATH: str = os.getenv("DB_PATH", "database.db")

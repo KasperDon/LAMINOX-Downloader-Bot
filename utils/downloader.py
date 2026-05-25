@@ -1,13 +1,19 @@
 """
 utils/downloader.py
 ───────────────────
-yt-dlp orqali media yuklash.
+yt-dlp orqali media yuklash — anti-bot himoya bilan.
 
   QUALITY_PRESETS       — video sifat darajalari (720p → 480p → 360p)
   download_raw_video()  — berilgan yt-dlp format bilan xom MP4 yuklab oladi
   download_audio()      — MP3 128 kbps yuklab ajratib beradi
   detect_platform()     — platformani aniqlaydi
   PermanentDownloadError — qayta urinish befoyda bo'lgan holatlar
+
+Anti-bot himoya:
+  • To'liq brauzer sarlavhalari (User-Agent, Accept-Language, Referer, ...)
+  • YouTube player_client: web + android + ios (navbatma-navbat)
+  • sleep_interval: so'rovlar orasida kutish
+  • Agar cookies.txt mavjud bo'lsa — avtomatik ishlatiladi
 """
 
 import asyncio
@@ -18,15 +24,44 @@ from typing import Optional
 
 import yt_dlp
 
-from config import AUDIO_BITRATE, DOWNLOAD_PATH
+from config import (
+    AUDIO_BITRATE,
+    COOKIES_PATH,
+    DOWNLOAD_PATH,
+    YOUTUBE_COOKIES_ENABLED,
+)
 
 logger = logging.getLogger(__name__)
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+# ──────────────────────────────────────────────────────────
+# Brauzer sarlavhalari — bot aniqlashdan himoya
+# ──────────────────────────────────────────────────────────
+
+_HEADERS: dict[str, str] = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9,uz;q=0.8,ru;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer":         "https://www.youtube.com/",
+    "Origin":          "https://www.youtube.com",
+    "Sec-Fetch-Dest":  "document",
+    "Sec-Fetch-Mode":  "navigate",
+    "Sec-Fetch-Site":  "same-origin",
+    "Sec-Ch-Ua":       '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+    "Sec-Ch-Ua-Mobile":   "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+}
+
+# ──────────────────────────────────────────────────────────
+# Platforma aniqlash
+# ──────────────────────────────────────────────────────────
 
 _PLATFORM_MAP = {
     ("youtube.com", "youtu.be"): "youtube",
@@ -34,9 +69,19 @@ _PLATFORM_MAP = {
     ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com"): "tiktok",
 }
 
-# ── Cascading sifat darajalari ────────────────────────────
-# Har bir preset: (yorliq, yt-dlp format matni)
-# Handler shu tartibda sinab ko'radi: 720p → 480p → 360p
+
+def detect_platform(url: str) -> str:
+    u = url.lower()
+    for domains, name in _PLATFORM_MAP.items():
+        if any(d in u for d in domains):
+            return name
+    return "unknown"
+
+
+# ──────────────────────────────────────────────────────────
+# Cascading sifat darajalari
+# ──────────────────────────────────────────────────────────
+
 QUALITY_PRESETS: list[tuple[str, str]] = [
     (
         "720p",
@@ -70,11 +115,12 @@ QUALITY_PRESETS: list[tuple[str, str]] = [
     ),
 ]
 
-# Permanent xatolar: qayta urinish befoyda
+# Permanent xatolar uchun kalit so'zlar
 _PERMANENT_KEYWORDS = (
     "private", "unavailable", "removed", "not available",
     "geo", "restricted", "age", "copyright", "404",
     "video unavailable", "this video is not available",
+    "confirm your age",
 )
 
 
@@ -83,22 +129,79 @@ class PermanentDownloadError(Exception):
 
 
 # ──────────────────────────────────────────────────────────
-# Yordamchilar
+# Umumiy yt-dlp sozlamalari
 # ──────────────────────────────────────────────────────────
 
-def detect_platform(url: str) -> str:
-    u = url.lower()
-    for domains, name in _PLATFORM_MAP.items():
-        if any(d in u for d in domains):
-            return name
-    return "unknown"
+def _cookie_opts() -> dict:
+    """
+    Agar YOUTUBE_COOKIES_ENABLED=true va cookies.txt mavjud bo'lsa,
+    cookiefile opsiyasini qaytaradi va logga yozadi.
+    """
+    if YOUTUBE_COOKIES_ENABLED and os.path.exists(COOKIES_PATH):
+        logger.info(f"Using YouTube cookies: {os.path.abspath(COOKIES_PATH)}")
+        return {"cookiefile": COOKIES_PATH}
+    if YOUTUBE_COOKIES_ENABLED and not os.path.exists(COOKIES_PATH):
+        logger.debug(
+            f"YOUTUBE_COOKIES_ENABLED=true lekin {COOKIES_PATH} topilmadi — "
+            "cookiesiz davom etiladi"
+        )
+    return {}
 
+
+def _common_opts() -> dict:
+    """
+    Barcha yuklab olishlarda ishlatiladigan asosiy sozlamalar:
+      - To'liq brauzer sarlavhalari
+      - YouTube player_client: web + android + ios
+      - Retry va uyqu oraliq vaqtlari
+      - Cookies (agar mavjud bo'lsa)
+    """
+    opts: dict = {
+        # ── Umumiy ────────────────────────────────────────
+        "quiet":            True,
+        "no_warnings":      True,
+        "socket_timeout":   60,
+
+        # ── Retry sozlamalari ──────────────────────────────
+        "retries":          5,
+        "fragment_retries": 5,
+        "file_access_retries": 3,
+
+        # ── Bot aniqlashga qarshi uyqu ─────────────────────
+        # Har bir so'rov orasida 1–3 soniya kutadi
+        "sleep_interval":      1,
+        "max_sleep_interval":  3,
+        "sleep_interval_requests": 1,
+
+        # ── Brauzer sarlavhalari ──────────────────────────
+        "http_headers": _HEADERS,
+
+        # ── YouTube maxsus sozlamalar ─────────────────────
+        # player_client: web (cookiessiz ham ishlaydi),
+        #   android va ios — zaxira variantlar
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "android", "ios"],
+            }
+        },
+    }
+    # Cookies fayl mavjud bo'lsa qo'shib qo'y
+    opts.update(_cookie_opts())
+    return opts
+
+
+# ──────────────────────────────────────────────────────────
+# Yordamchi
+# ──────────────────────────────────────────────────────────
 
 def _find_output_file(directory: str, prefix: str) -> Optional[str]:
-    """Prefiks bo'yicha papkada fayl qidiradi (yt-dlp ba'zan kengaytma o'zgartirar)."""
-    for name in os.listdir(directory):
-        if name.startswith(prefix):
-            return os.path.join(directory, name)
+    """Prefiks bo'yicha papkada fayl qidiradi."""
+    try:
+        for name in os.listdir(directory):
+            if name.startswith(prefix):
+                return os.path.join(directory, name)
+    except OSError:
+        pass
     return None
 
 
@@ -120,16 +223,12 @@ async def download_raw_video(url: str, fmt: str) -> str:
     prefix = f"vid_{fid}"
     tpl    = os.path.join(DOWNLOAD_PATH, f"{prefix}.%(ext)s")
 
-    opts = {
-        "format":               fmt,
-        "outtmpl":              tpl,
-        "merge_output_format":  "mp4",
-        "quiet":                True,
-        "no_warnings":          True,
-        "socket_timeout":       60,
-        "retries":              2,
-        "http_headers":         {"User-Agent": _UA},
-    }
+    opts = _common_opts()
+    opts.update({
+        "format":              fmt,
+        "outtmpl":             tpl,
+        "merge_output_format": "mp4",
+    })
 
     result: dict = {"path": None, "error": None, "permanent": False}
 
@@ -188,13 +287,10 @@ async def download_audio(url: str) -> str:
     # AUDIO_BITRATE: "128k" → "128"  (yt-dlp raqam kutadi)
     bitrate_num = AUDIO_BITRATE.rstrip("kK")
 
-    opts = {
-        "format":       "bestaudio/best",
-        "outtmpl":      tpl,
-        "quiet":        True,
-        "no_warnings":  True,
-        "socket_timeout": 60,
-        "retries":      3,
+    opts = _common_opts()
+    opts.update({
+        "format":  "bestaudio/best",
+        "outtmpl": tpl,
         "postprocessors": [
             {
                 "key":              "FFmpegExtractAudio",
@@ -203,8 +299,7 @@ async def download_audio(url: str) -> str:
             },
             {"key": "FFmpegMetadata", "add_metadata": True},
         ],
-        "http_headers": {"User-Agent": _UA},
-    }
+    })
 
     result: dict = {"path": None, "error": None}
 

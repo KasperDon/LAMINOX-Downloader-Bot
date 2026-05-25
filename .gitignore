@@ -1,6 +1,9 @@
 # Environment
 .env
 
+# YouTube cookies — maxfiy, GitHub'ga yuklanmasin!
+cookies.txt
+
 # Database
 *.db
 *.sqlite3
