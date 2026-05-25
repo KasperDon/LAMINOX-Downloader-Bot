@@ -4,19 +4,13 @@ handlers/download.py
 Video va MP3 yuklab olish — 2 xil rejim:
 
   REJIM 1 — Tugma orqali (FSM):
-    Foydalanuvchi "🎥 Video" yoki "🎵 MP3" tugmasini bosadi
-    → Bot link yuborishni so'raydi (DLState.waiting_video_url / waiting_audio_url)
-    → Foydalanuvchi link yuboradi → yuklab olish boshlanadi
+    Tugma → waiting_video_url / waiting_audio_url → link → yuklab olish
 
-  REJIM 2 — To'g'ridan-to'g'ri link (StateFilter(None)):
-    Foydalanuvchi hech qanday holatsiz link yuboradi
-    → Bot platformani aniqlaydi → format so'raydi (DLState.waiting_format)
-    → Foydalanuvchi "🎥 Video" yoki "🎵 MP3" tugmasini bosadi → yuklab olish
+  REJIM 2 — To'g'ridan-to'g'ri link:
+    Link → platforma aniqlanadi → format so'raladi → yuklab olish
 
-Xavfsizlik:
-  - Obuna tekshiruvi har so'rovda
-  - Anti-spam cooldown
-  - Vaqtinchalik fayllar har doim o'chiriladi (finally blok)
+Admin bildirish:
+  Har bir muvaffaqiyatli yuklab olishdan keyin adminlarga xabar yuboriladi.
 """
 
 import logging
@@ -40,6 +34,7 @@ from utils.checker import check_subscription
 from utils.database import increment_downloads, log_download
 from utils.downloader import detect_platform, download_media
 from utils.helpers import cleanup_file, format_size, is_valid_url, user_friendly_error
+from utils.notifications import notify_download
 from utils.watermark import apply_watermark
 
 logger = logging.getLogger(__name__)
@@ -58,18 +53,16 @@ _cooldowns: dict[int, float] = {}
 # ── FSM holatlari ─────────────────────────────────────────
 
 class DLState(StatesGroup):
-    waiting_video_url = State()   # "🎥 Video" tugmasi bosildi, link kutilmoqda
-    waiting_audio_url = State()   # "🎵 MP3"  tugmasi bosildi, link kutilmoqda
-    waiting_format    = State()   # To'g'ridan-to'g'ri link keldi, format kutilmoqda
+    waiting_video_url = State()   # Tugma bosildi, link kutilmoqda
+    waiting_audio_url = State()   # Tugma bosildi, link kutilmoqda
+    waiting_format    = State()   # Link keldi, format kutilmoqda
 
 
-# ── Cooldown yordamchilari ────────────────────────────────
+# ── Cooldown ──────────────────────────────────────────────
 
 def _cooldown_remaining(user_id: int) -> int:
     ts = _cooldowns.get(user_id)
-    if ts is None:
-        return 0
-    return max(0, int(COOLDOWN_SECONDS - (time.monotonic() - ts)))
+    return max(0, int(COOLDOWN_SECONDS - (time.monotonic() - ts))) if ts else 0
 
 
 def _set_cooldown(user_id: int) -> None:
@@ -77,12 +70,13 @@ def _set_cooldown(user_id: int) -> None:
 
 
 # ══════════════════════════════════════════════════════════
-# YADRO: yuklab olish va yuborish funksiyalari
-# (har ikkala rejimdan ham chaqiriladi)
+# YADRO: yuklab olish va yuborish
+# user — to'liq aiogram User obyekti (notification uchun kerak)
+# ref  — javob yozish uchun reference Message (chat ID olinadi)
 # ══════════════════════════════════════════════════════════
 
-async def _do_video(ref: Message, user_id: int, url: str, platform: str) -> None:
-    """Video yuklab olib, watermark qo'shib, yuboradi."""
+async def _do_video(ref: Message, user, url: str, platform: str) -> None:
+    """Video yuklab olib, watermark qo'shib, yuboradi. Admin xabarnomasi."""
     emoji    = _PLATFORM_EMOJI.get(platform, "🌐")
     wm_label = "  ·  🎨 watermark" if WATERMARK_ENABLED else ""
 
@@ -117,8 +111,7 @@ async def _do_video(ref: Message, user_id: int, url: str, platform: str) -> None
         if size > MAX_FILE_SIZE:
             await status.edit_text(
                 "❌ <b>Fayl juda katta!</b>\n\n"
-                "Telegram 50 MB dan katta fayllarni qabul qilmaydi.\n"
-                "Boshqa sifatda urinib ko'ring.",
+                "Telegram 50 MB dan katta fayllarni qabul qilmaydi.",
                 reply_markup=main_menu_keyboard(),
             )
             return
@@ -138,8 +131,15 @@ async def _do_video(ref: Message, user_id: int, url: str, platform: str) -> None
         )
         await status.delete()
 
-        await increment_downloads(user_id)
-        await log_download(user_id, platform, "video", url)
+        # DB logi
+        await increment_downloads(user.id)
+        await log_download(user.id, platform, "video", url)
+
+        # ── Admin xabarnomasi ──────────────────────────
+        try:
+            await notify_download(ref.bot, user, platform, "video", size, url)
+        except Exception as notify_err:
+            logger.debug(f"Notification xatolik: {notify_err}")
 
     except Exception as exc:
         logger.error(f"Video xatolik [{platform}]: {exc}")
@@ -154,8 +154,8 @@ async def _do_video(ref: Message, user_id: int, url: str, platform: str) -> None
             await cleanup_file(wm_path)
 
 
-async def _do_audio(ref: Message, user_id: int, url: str, platform: str) -> None:
-    """Audio ajratib, MP3 formatda yuboradi. Watermark qo'shilmaydi."""
+async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
+    """Audio ajratib, MP3 formatda yuboradi. Admin xabarnomasi."""
     emoji  = _PLATFORM_EMOJI.get(platform, "🌐")
     status = await ref.answer(
         f"⏳ <b>Audio ajratilmoqda...</b>\n\n"
@@ -190,8 +190,15 @@ async def _do_audio(ref: Message, user_id: int, url: str, platform: str) -> None
         )
         await status.delete()
 
-        await increment_downloads(user_id)
-        await log_download(user_id, platform, "audio", url)
+        # DB logi
+        await increment_downloads(user.id)
+        await log_download(user.id, platform, "audio", url)
+
+        # ── Admin xabarnomasi ──────────────────────────
+        try:
+            await notify_download(ref.bot, user, platform, "audio", size, url)
+        except Exception as notify_err:
+            logger.debug(f"Notification xatolik: {notify_err}")
 
     except Exception as exc:
         logger.error(f"Audio xatolik [{platform}]: {exc}")
@@ -206,19 +213,13 @@ async def _do_audio(ref: Message, user_id: int, url: str, platform: str) -> None
 
 # ══════════════════════════════════════════════════════════
 # REJIM 2: To'g'ridan-to'g'ri link → format so'rash
-# StateFilter(None) = foydalanuvchi hech qanday holatda emas
 # ══════════════════════════════════════════════════════════
 
 @router.message(StateFilter(None), F.text.regexp(r"https?://\S+"))
 async def handle_url_direct(message: Message, state: FSMContext, bot) -> None:
-    """
-    Foydalanuvchi tugma bosmay to'g'ridan-to'g'ri link yuborsa.
-    Platformani aniqlaydi va format tanlashni so'raydi.
-    """
     url = message.text.strip()
     uid = message.from_user.id
 
-    # Obuna tekshiruvi
     if not await check_subscription(bot, uid):
         await message.answer(
             f"🔒 Botdan foydalanish uchun kanalga obuna bo'ling:\n{CHANNEL_URL}",
@@ -226,7 +227,6 @@ async def handle_url_direct(message: Message, state: FSMContext, bot) -> None:
         )
         return
 
-    # Cooldown
     rem = _cooldown_remaining(uid)
     if rem:
         await message.answer(
@@ -235,12 +235,10 @@ async def handle_url_direct(message: Message, state: FSMContext, bot) -> None:
         )
         return
 
-    # Platforma aniqlash
     platform = detect_platform(url)
     if platform == "unknown":
         await message.answer(
             "❌ <b>Qo'llab-quvvatlanmaydigan platforma!</b>\n\n"
-            "Faqat YouTube, Instagram va TikTok linklariga ruxsat berilgan.\n\n"
             "Qo'llab-quvvatlanadigan:\n"
             "├ 🔴  youtube.com / youtu.be\n"
             "├ 📸  instagram.com\n"
@@ -249,7 +247,6 @@ async def handle_url_direct(message: Message, state: FSMContext, bot) -> None:
         )
         return
 
-    # URL va platformani FSM data'ga saqlash, format so'rash
     await state.set_state(DLState.waiting_format)
     await state.update_data(url=url, platform=platform)
 
@@ -263,7 +260,7 @@ async def handle_url_direct(message: Message, state: FSMContext, bot) -> None:
     )
 
 
-# ── Format tanlash callbacklari ───────────────────────────
+# ── Format tanlash: 🎥 Video ──────────────────────────────
 
 @router.callback_query(DLState.waiting_format, F.data == "fmt_video")
 async def cb_fmt_video(callback: CallbackQuery, state: FSMContext) -> None:
@@ -272,14 +269,15 @@ async def cb_fmt_video(callback: CallbackQuery, state: FSMContext) -> None:
     platform = data.get("platform", "unknown")
     await state.clear()
     _set_cooldown(callback.from_user.id)
-    # Tugmani olib tashla
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
     await callback.answer()
-    await _do_video(callback.message, callback.from_user.id, url, platform)
+    await _do_video(callback.message, callback.from_user, url, platform)
 
+
+# ── Format tanlash: 🎵 MP3 ───────────────────────────────
 
 @router.callback_query(DLState.waiting_format, F.data == "fmt_audio")
 async def cb_fmt_audio(callback: CallbackQuery, state: FSMContext) -> None:
@@ -293,10 +291,10 @@ async def cb_fmt_audio(callback: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         pass
     await callback.answer()
-    await _do_audio(callback.message, callback.from_user.id, url, platform)
+    await _do_audio(callback.message, callback.from_user, url, platform)
 
 
-# waiting_format holatida boshqa matn kelsa (URL emas)
+# waiting_format holatida boshqa matn kelsa
 @router.message(DLState.waiting_format)
 async def handle_text_while_choosing(message: Message) -> None:
     await message.answer(
@@ -384,7 +382,7 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("Bekor qilindi")
 
 
-# ── FSM holat: Video URL qayta ishlash ───────────────────
+# ── FSM: Video URL → yuklab olish ────────────────────────
 
 @router.message(DLState.waiting_video_url)
 async def process_video_url(message: Message, state: FSMContext) -> None:
@@ -408,10 +406,10 @@ async def process_video_url(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     _set_cooldown(message.from_user.id)
-    await _do_video(message, message.from_user.id, url, platform)
+    await _do_video(message, message.from_user, url, platform)
 
 
-# ── FSM holat: Audio URL qayta ishlash ───────────────────
+# ── FSM: Audio URL → yuklab olish ────────────────────────
 
 @router.message(DLState.waiting_audio_url)
 async def process_audio_url(message: Message, state: FSMContext) -> None:
@@ -435,4 +433,4 @@ async def process_audio_url(message: Message, state: FSMContext) -> None:
 
     await state.clear()
     _set_cooldown(message.from_user.id)
-    await _do_audio(message, message.from_user.id, url, platform)
+    await _do_audio(message, message.from_user, url, platform)

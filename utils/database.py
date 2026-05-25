@@ -56,6 +56,19 @@ async def init_db() -> None:
 # Foydalanuvchi
 # ──────────────────────────────────────────────────────────
 
+async def is_new_user(user_id: int) -> bool:
+    """
+    Foydalanuvchi avval botni ishlatmaganini tekshiradi.
+    True  → birinchi marta (yangi)
+    False → allaqachon bazada bor
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT 1 FROM users WHERE user_id = ?", (user_id,)
+        ) as cur:
+            return await cur.fetchone() is None
+
+
 async def upsert_user(user_id: int, username: str, full_name: str) -> None:
     now = datetime.now().isoformat()
     async with aiosqlite.connect(DB_PATH) as db:

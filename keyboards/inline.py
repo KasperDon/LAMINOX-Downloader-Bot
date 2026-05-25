@@ -20,7 +20,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🎥 Video yuklash", callback_data="download_video"),
         InlineKeyboardButton(text="🎵 MP3 yuklash",   callback_data="download_audio"),
     )
-    kb.row(InlineKeyboardButton(text="ℹ️ Yordam", callback_data="help"))
+    kb.row(InlineKeyboardButton(text="🏠 Bosh menyu", callback_data="main_menu"))
     return kb.as_markup()
 
 
