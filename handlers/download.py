@@ -9,6 +9,13 @@ Video va MP3 yuklab olish — 2 xil rejim:
   REJIM 2 — To'g'ridan-to'g'ri link:
     Link → platforma aniqlanadi → format so'raladi → yuklab olish
 
+Video yuklash strategiyasi (50 MB limit):
+  1. 720p yuklab olish → FFmpeg CRF-28 siqish (+ ixtiyoriy watermark)
+  2. Agar ≤ 50 MB bo'lsa → yuborish ✅
+  3. Aks holda 480p bilan qayta urinish
+  4. Kerak bo'lsa 360p
+  5. Barchasi katta bo'lsa → xatolik
+
 Admin bildirish:
   Har bir muvaffaqiyatli yuklab olishdan keyin adminlarga xabar yuboriladi.
 """
@@ -32,10 +39,16 @@ from keyboards.inline import (
 )
 from utils.checker import check_subscription
 from utils.database import increment_downloads, log_download
-from utils.downloader import detect_platform, download_media
+from utils.downloader import (
+    QUALITY_PRESETS,
+    PermanentDownloadError,
+    detect_platform,
+    download_audio,
+    download_raw_video,
+)
 from utils.helpers import cleanup_file, format_size, is_valid_url, user_friendly_error
 from utils.notifications import notify_download
-from utils.watermark import apply_watermark
+from utils.watermark import process_video
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -70,13 +83,14 @@ def _set_cooldown(user_id: int) -> None:
 
 
 # ══════════════════════════════════════════════════════════
-# YADRO: yuklab olish va yuborish
-# user — to'liq aiogram User obyekti (notification uchun kerak)
-# ref  — javob yozish uchun reference Message (chat ID olinadi)
+# YADRO: video yuklab olish (cascading quality)
 # ══════════════════════════════════════════════════════════
 
 async def _do_video(ref: Message, user, url: str, platform: str) -> None:
-    """Video yuklab olib, watermark qo'shib, yuboradi. Admin xabarnomasi."""
+    """
+    Video yuklab olib, FFmpeg bilan siqib (+ watermark), Telegramga yuboradi.
+    Agar 50 MB dan katta bo'lsa, avtomatik pastroq sifatda qayta urinadi.
+    """
     emoji    = _PLATFORM_EMOJI.get(platform, "🌐")
     wm_label = "  ·  🎨 watermark" if WATERMARK_ENABLED else ""
 
@@ -86,37 +100,87 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
         f"🔄 Iltimos kuting..."
     )
 
-    raw_path: str | None = None
-    wm_path:  str | None = None
+    raw_path: str | None = None   # yt-dlp tomonidan yuklangan xom MP4
+    out_path: str | None = None   # FFmpeg tomonidan qayta ishlangan MP4
+    send_path: str | None = None  # Telegramga yuborilish uchun fayl
+    send_size: int = 0
 
     try:
-        raw_path = await download_media(url, media_type="video")
+        for i, (quality_label, fmt) in enumerate(QUALITY_PRESETS):
 
-        if WATERMARK_ENABLED:
+            # ── Keyingi urinish uchun xabar ───────────────
+            if i > 0:
+                await status.edit_text(
+                    f"📐 <b>Video hajmi katta, {quality_label}da qayta tayyorlanmoqda...</b>\n\n"
+                    f"{emoji} <b>{platform.capitalize()}</b>  →  📹 MP4\n\n"
+                    f"🔄 Iltimos kuting..."
+                )
+                # Oldingi xom faylni o'chirish
+                if raw_path:
+                    await cleanup_file(raw_path)
+                    raw_path = None
+
+            # ── 1. yt-dlp: xom video yuklab olish ─────────
+            try:
+                raw_path = await download_raw_video(url, fmt)
+            except PermanentDownloadError:
+                raise  # Qayta urinish befoyda
+            except Exception:
+                if i < len(QUALITY_PRESETS) - 1:
+                    continue   # Keyingi sifatni sinab ko'r
+                raise          # Oxirgi urinish ham muvaffaqiyatsiz
+
+            # ── 2. FFmpeg: siqish (+ ixtiyoriy watermark) ─
             await status.edit_text(
-                f"🎨 <b>Watermark qo'shilmoqda...</b>\n\n"
+                f"⚙️ <b>{quality_label}: siqilmoqda"
+                f"{'  · 🎨 watermark' if WATERMARK_ENABLED else ''}...</b>\n\n"
                 f"{emoji} <b>{platform.capitalize()}</b>  →  📹 MP4\n\n"
                 f"🔄 Iltimos kuting..."
             )
-            try:
-                wm_path   = await apply_watermark(raw_path)
-                send_path = wm_path
-            except Exception as wm_err:
-                logger.warning(f"Watermark xatolik, original yuboriladi: {wm_err}")
-                send_path = raw_path
-        else:
-            send_path = raw_path
 
-        size = os.path.getsize(send_path)
-        if size > MAX_FILE_SIZE:
+            # Oldingi FFmpeg natijasini tozalash
+            if out_path and out_path != raw_path:
+                await cleanup_file(out_path)
+            out_path = None
+
+            try:
+                out_path = await process_video(raw_path, watermark=WATERMARK_ENABLED)
+            except Exception as ffmpeg_err:
+                logger.warning(
+                    f"FFmpeg xatolik ({quality_label}): {ffmpeg_err} — xom fayl yuboriladi"
+                )
+                out_path = raw_path   # Fallback: watermarksiz original
+
+            # ── 3. Hajm tekshiruvi ─────────────────────────
+            size = os.path.getsize(out_path)
+
+            if size <= MAX_FILE_SIZE:
+                send_path = out_path
+                send_size = size
+                break   # Bu sifat mos keldi ✅
+
+            # Hali ham katta → keyingi sifatni sinab ko'r
+            logger.info(
+                f"{quality_label} siqilgandan keyin ham katta: "
+                f"{size / (1024*1024):.1f} MB > 50 MB"
+            )
+            if out_path != raw_path:
+                await cleanup_file(out_path)
+            out_path = None
+
+        # ── Barcha sifatlar katta bo'lib qoldi ────────────
+        if send_path is None:
             await status.edit_text(
-                "❌ <b>Fayl juda katta!</b>\n\n"
-                "Telegram 50 MB dan katta fayllarni qabul qilmaydi.",
+                "❌ <b>Video hajmi juda katta!</b>\n\n"
+                "Barcha sifat darajalarida (720p / 480p / 360p) ham\n"
+                "50 MB dan oshib ketdi.\n\n"
+                "Qisqaroq yoki kichikroq video yuboring.",
                 reply_markup=main_menu_keyboard(),
             )
             return
 
-        await status.edit_text(f"📤 <b>Yuborilmoqda...</b>  ({format_size(size)})")
+        # ── 4. Telegramga yuborish ─────────────────────────
+        await status.edit_text(f"📤 <b>Yuborilmoqda...</b>  ({format_size(send_size)})")
 
         wm_badge = "  ·  🎨 Watermark" if WATERMARK_ENABLED else ""
         await ref.answer_video(
@@ -124,23 +188,29 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
             caption=(
                 f"✅ <b>Muvaffaqiyatli yuklandi!</b>\n\n"
                 f"{emoji} Platforma: <b>{platform.capitalize()}</b>\n"
-                f"📦 Hajm: <b>{format_size(size)}</b>{wm_badge}\n\n"
+                f"📦 Hajm: <b>{format_size(send_size)}</b>{wm_badge}\n\n"
                 f"🤖 @laminox"
             ),
             reply_markup=main_menu_keyboard(),
         )
         await status.delete()
 
-        # DB logi
+        # ── 5. DB logi + Admin xabarnomasi ────────────────
         await increment_downloads(user.id)
         await log_download(user.id, platform, "video", url)
 
-        # ── Admin xabarnomasi ──────────────────────────
         try:
-            await notify_download(ref.bot, user, platform, "video", size, url)
+            await notify_download(ref.bot, user, platform, "video", send_size, url)
         except Exception as notify_err:
             logger.debug(f"Notification xatolik: {notify_err}")
 
+    except PermanentDownloadError as exc:
+        logger.warning(f"Permanent xato [{platform}]: {exc}")
+        await status.edit_text(
+            f"❌ <b>Video mavjud emas yoki himoyalangan!</b>\n\n"
+            f"{user_friendly_error(str(exc))}",
+            reply_markup=main_menu_keyboard(),
+        )
     except Exception as exc:
         logger.error(f"Video xatolik [{platform}]: {exc}")
         await status.edit_text(
@@ -148,25 +218,30 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
             reply_markup=main_menu_keyboard(),
         )
     finally:
+        # Barcha vaqtinchalik fayllarni tozalash
         if raw_path:
             await cleanup_file(raw_path)
-        if wm_path and wm_path != raw_path:
-            await cleanup_file(wm_path)
+        if out_path and out_path != raw_path:
+            await cleanup_file(out_path)
 
+
+# ══════════════════════════════════════════════════════════
+# YADRO: audio yuklab olish (MP3 128 kbps)
+# ══════════════════════════════════════════════════════════
 
 async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
-    """Audio ajratib, MP3 formatda yuboradi. Admin xabarnomasi."""
+    """Audio ajratib, MP3 128 kbps formatda yuboradi. Admin xabarnomasi."""
     emoji  = _PLATFORM_EMOJI.get(platform, "🌐")
     status = await ref.answer(
         f"⏳ <b>Audio ajratilmoqda...</b>\n\n"
-        f"{emoji} <b>{platform.capitalize()}</b>  →  🎵 MP3\n\n"
+        f"{emoji} <b>{platform.capitalize()}</b>  →  🎵 MP3 128kbps\n\n"
         f"🔄 Iltimos kuting..."
     )
 
     file_path: str | None = None
     try:
-        file_path = await download_media(url, media_type="audio")
-        size = os.path.getsize(file_path)
+        file_path = await download_audio(url)
+        size      = os.path.getsize(file_path)
 
         if size > MAX_FILE_SIZE:
             await status.edit_text(
@@ -190,11 +265,10 @@ async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
         )
         await status.delete()
 
-        # DB logi
+        # DB logi + Admin xabarnomasi
         await increment_downloads(user.id)
         await log_download(user.id, platform, "audio", url)
 
-        # ── Admin xabarnomasi ──────────────────────────
         try:
             await notify_download(ref.bot, user, platform, "audio", size, url)
         except Exception as notify_err:

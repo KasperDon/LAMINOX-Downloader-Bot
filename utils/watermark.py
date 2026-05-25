@@ -1,10 +1,17 @@
 """
 utils/watermark.py
 ──────────────────
-FFmpeg orqali MP4 videoga pastki o'ng burchakda matn watermark qo'shadi.
-MP3 fayllar uchun bu modul chaqirilmaydi.
+FFmpeg orqali MP4 videoni H.264 (CRF 28) bilan siqadi va
+ixtiyoriy ravishda pastki o'ng burchakka matn watermark qo'shadi.
 
-Sozlamalar config.py → WATERMARK_ENABLED, WATERMARK_TEXT
+Asosiy funksiya:
+  process_video(input_path, watermark=True) → output_path
+
+Bir o'tishda (single-pass) ham siqish ham watermark:
+  - Codec:   libx264  CRF 28  preset fast
+  - Audio:   AAC  128 kbps
+  - Flags:   +faststart  (veb/Telegram uchun optimallashtirilgan)
+  - Watermark: pastki o'ng burchak, oq yozuv, qora yariq shaffof fon
 """
 
 import asyncio
@@ -12,7 +19,7 @@ import logging
 import os
 import uuid
 
-from config import DOWNLOAD_PATH, WATERMARK_TEXT
+from config import DOWNLOAD_PATH, VIDEO_AUDIO_BITRATE, VIDEO_CRF, WATERMARK_TEXT
 
 logger = logging.getLogger(__name__)
 
@@ -22,54 +29,52 @@ def _escape_drawtext(text: str) -> str:
     return (
         text
         .replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace(":", "\\:")
-        .replace("%", "\\%")
+        .replace("'",  "\\'")
+        .replace(":",  "\\:")
+        .replace("%",  "\\%")
     )
 
 
-async def apply_watermark(input_path: str) -> str:
+async def process_video(input_path: str, watermark: bool = True) -> str:
     """
-    input_path  → yuklab olingan original MP4
-    return      → watermark qo'shilgan yangi MP4 yo'li
+    input_path  → original MP4 (yt-dlp tomonidan yuklangan)
+    watermark   → True: WATERMARK_TEXT matnini qo'shadi
+    return      → siqilgan (va ixtiyoriy watermark qo'shilgan) MP4 yo'li
 
-    Xatolik bo'lsa Exception ko'taradi —
-    handler uni ushlab, original faylni yuboradi.
+    Xatolik bo'lsa RuntimeError ko'taradi.
     """
-    fid = uuid.uuid4().hex[:8]
-    output_path = os.path.join(DOWNLOAD_PATH, f"wm_{fid}.mp4")
+    fid         = uuid.uuid4().hex[:8]
+    output_path = os.path.join(DOWNLOAD_PATH, f"out_{fid}.mp4")
 
-    safe_text = _escape_drawtext(WATERMARK_TEXT)
+    cmd = ["ffmpeg", "-i", input_path]
 
-    # drawtext filter:
-    #   pastki o'ng burchak (w-tw-15 : h-th-15)
-    #   oq yozuv, 70% shaffoflik
-    #   qora yariq shaffof fon (professional ko'rinish)
-    vf = (
-        f"drawtext=text='{safe_text}'"
-        f":fontcolor=white@0.85"
-        f":fontsize=24"
-        f":x=w-tw-15"
-        f":y=h-th-15"
-        f":box=1"
-        f":boxcolor=black@0.45"
-        f":boxborderw=7"
-    )
+    if watermark:
+        safe_text = _escape_drawtext(WATERMARK_TEXT)
+        vf = (
+            f"drawtext=text='{safe_text}'"
+            f":fontcolor=white@0.85"
+            f":fontsize=24"
+            f":x=w-tw-15"
+            f":y=h-th-15"
+            f":box=1"
+            f":boxcolor=black@0.45"
+            f":boxborderw=7"
+        )
+        cmd += ["-vf", vf]
 
-    cmd = [
-        "ffmpeg",
-        "-i", input_path,
-        "-vf", vf,
-        "-codec:v", "libx264",
-        "-preset", "veryfast",   # tez encoding
-        "-crf", "23",            # sifat (18=yuqori, 28=past)
-        "-codec:a", "copy",      # audio o'zgarmaydi
-        "-movflags", "+faststart",
-        "-y",                    # mavjud faylni ustiga yoz
+    cmd += [
+        "-codec:v",   "libx264",
+        "-preset",    "fast",          # veryfast'dan sifatliroq, tez
+        "-crf",       str(VIDEO_CRF),  # 28 = yaxshi siqish, 18 = yuqori sifat
+        "-codec:a",   "aac",
+        "-b:a",       VIDEO_AUDIO_BITRATE,  # 128k
+        "-movflags",  "+faststart",    # Telegram stream uchun
+        "-y",                          # mavjud faylni ustiga yoz
         output_path,
     ]
 
-    logger.info(f"Watermark qo'shilmoqda: {os.path.basename(input_path)}")
+    label = f"[CRF {VIDEO_CRF}{'+ watermark' if watermark else ''}]"
+    logger.info(f"FFmpeg {label}: {os.path.basename(input_path)} → {os.path.basename(output_path)}")
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -79,12 +84,20 @@ async def apply_watermark(input_path: str) -> str:
     _, stderr = await proc.communicate()
 
     if proc.returncode != 0:
-        err = stderr.decode(errors="ignore")[-300:]
-        logger.error(f"FFmpeg watermark xatolik (kod {proc.returncode}): {err}")
+        err = stderr.decode(errors="ignore")[-400:]
+        logger.error(f"FFmpeg xatolik (kod {proc.returncode}): {err}")
         raise RuntimeError(f"FFmpeg xatolik: {err}")
 
     if not os.path.exists(output_path):
-        raise RuntimeError("Watermark fayli yaratilmadi")
+        raise RuntimeError("FFmpeg chiqdi faylini yaratmadi")
 
-    logger.info(f"Watermark tayyor: {os.path.basename(output_path)}")
+    out_mb = os.path.getsize(output_path) / (1024 * 1024)
+    logger.info(f"FFmpeg tayyor {label}: {out_mb:.1f} MB")
     return output_path
+
+
+# ── Moslik qatlamasi ──────────────────────────────────────
+
+async def apply_watermark(input_path: str) -> str:
+    """Eski import'lar uchun. Yangi kod process_video() ishlatsin."""
+    return await process_video(input_path, watermark=True)

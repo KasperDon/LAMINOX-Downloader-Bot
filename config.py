@@ -29,5 +29,11 @@ COOLDOWN_SECONDS: int = int(os.getenv("COOLDOWN_SECONDS", "15"))
 WATERMARK_ENABLED: bool = os.getenv("WATERMARK_ENABLED", "true").lower() in ("1", "true", "yes")
 WATERMARK_TEXT: str = os.getenv("WATERMARK_TEXT", "@laminox")
 
+# ── FFmpeg siqish ─────────────────────────────────────────
+# CRF: 18 = yuqori sifat (katta hajm), 28 = past sifat (kichik hajm)
+VIDEO_CRF: int = int(os.getenv("VIDEO_CRF", "28"))
+VIDEO_AUDIO_BITRATE: str = os.getenv("VIDEO_AUDIO_BITRATE", "128k")
+AUDIO_BITRATE: str = os.getenv("AUDIO_BITRATE", "128k")
+
 # ── Ma'lumotlar bazasi ────────────────────────────────────
 DB_PATH: str = os.getenv("DB_PATH", "database.db")
