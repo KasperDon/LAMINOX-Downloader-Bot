@@ -24,6 +24,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
     TZ=Asia/Tashkent
 
-# yt-dlp YouTube tez-tez o'zgaradi — har container ishga tushganda yangilaymiz.
-# Build vaqtida emas, RUNTIME'da yangilanadi → har doim eng yangi versiya.
-CMD ["sh", "-c", "pip install --upgrade --quiet yt-dlp && echo '✅ yt-dlp yangilandi' && python bot.py"]
+# yt-dlp GitHub master'dan o'rnatiladi — PyPI cache'ni chetlab o'tadi.
+# GitHub master har kuni yangilanadi, PyPI versiyasidan 2-4 hafta ilgari.
+CMD ["sh", "-c", "\
+  pip install --upgrade --quiet --no-cache-dir \
+    'yt-dlp @ https://github.com/yt-dlp/yt-dlp/archive/master.tar.gz' \
+  && echo '✅ yt-dlp (master) yangilandi' \
+  && python bot.py"]

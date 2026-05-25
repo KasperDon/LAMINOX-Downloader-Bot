@@ -136,8 +136,8 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
             # ── 1. yt-dlp: xom video ──────────────────────
             try:
                 raw_path = await download_raw_video(url, fmt)
-            except (YouTubeAuthError, PermanentDownloadError):
-                raise  # Bu xatolar retry bilan hal bo'lmaydi
+            except (YouTubeAuthError, PermanentDownloadError, YouTubePlayerError):
+                raise  # Sifat o'zgarishi bu xatolarni hal qilmaydi
             except Exception:
                 if i < len(QUALITY_PRESETS) - 1:
                     continue

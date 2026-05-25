@@ -50,10 +50,13 @@ logger = logging.getLogger(__name__)
 # tv_embedded qo'llab-quvvatlash cheklovlari uchun saqlandi.
 
 _YOUTUBE_PLAYER_CLIENTS: list[str] = [
-    "ios",          # ✅ PO token kerak emas — eng ishonchli
-    "android",      # ✅ PO token kerak emas
-    "mweb",         # ✅ Mobil veb
-    "tv_embedded",  # ✅ Ayrim cheklangan videolar uchun
+    # 2025-2026: PO token talab qilmaydigan clientlar birinchi.
+    "ios",           # ✅ Eng ishonchli — API, PO token kerak emas
+    "android",       # ✅ PO token kerak emas
+    "web_creator",   # ✅ YouTube Studio client — ayrim bloklarni chetlab o'tadi
+    "android_vr",    # ✅ VR client — cheklovlar kamroq
+    "mweb",          # ✅ Mobil veb
+    "tv_embedded",   # ✅ TV embedded
 ]
 
 # Har bir client urinishi uchun maksimal vaqt (soniyada)
