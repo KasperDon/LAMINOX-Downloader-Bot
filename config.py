@@ -44,6 +44,12 @@ YOUTUBE_COOKIES_ENABLED: bool = os.getenv("YOUTUBE_COOKIES_ENABLED", "true").low
 )
 COOKIES_PATH: str = os.getenv("COOKIES_PATH", "cookies.txt")
 
+# ── Cobalt API ────────────────────────────────────────────
+# api.cobalt.tools JWT talab qiladi.
+# cobalt.tools saytida ro'yxatdan o'ting → Settings → API key
+# Keyin Railway'ga: COBALT_API_KEY=eyJ...
+COBALT_API_KEY: str = os.getenv("COBALT_API_KEY", "").strip()
+
 # ── Proxy ────────────────────────────────────────────────
 # Ixtiyoriy — bo'sh qoldirilsa proxy ishlatilmaydi.
 # Formatlar:

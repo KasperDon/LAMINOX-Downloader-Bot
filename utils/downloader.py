@@ -33,6 +33,7 @@ import yt_dlp
 
 from config import (
     AUDIO_BITRATE,
+    COBALT_API_KEY,
     COOKIES_PATH,
     DOWNLOAD_PATH,
     PROXY_URL,
@@ -65,14 +66,18 @@ PIPED_INSTANCES: list[str] = [
 ]
 
 # Cobalt API instance'lari (github.com/imputnet/cobalt)
-# Cobalt YouTube'ni o'z serverlaridan yuklaydi — Railway IP bloklangan bo'lsa ham ishlaydi
-# ssl=False ishlatiladi — community instance'larda sertifikat muammolari bo'lishi mumkin
+# Cobalt YouTube'ni o'z serverlaridan yuklaydi — Railway IP bloklangan bo'lsa ham ishlaydi.
+# MUHIM: proxy ishlatilmaydi — Cobalt Railway IPni bloklaydi, proxy 502 qaytarishi mumkin.
+# ssl=False: community instance sertifikatlari muddati o'tgan/o'z-imzolangan bo'lishi mumkin.
+# API versiyasi:
+#   v10 (yangi): POST /           — {"url","videoQuality","downloadMode"}
+#   v7  (eski):  POST /api/json   — {"url","vQuality","isAudioOnly"}
 COBALT_INSTANCES: list[str] = [
-    "https://cobalt.api.timelessnesses.me",  # ssl: o'z-imzolangan, ssl=False bilan ishlaydi
-    "https://cobalt.drgns.space",            # ssl: muddati o'tgan, ssl=False bilan ishlaydi
-    "https://cobaltapi.void.cat",            # community instance
-    "https://co.wuk.sh",                     # community instance
-    "https://api.cobalt.tools",              # rasmiy, oxirgi sinab ko'riladi
+    "https://cobalt.api.timelessnesses.me",  # v7 (404 qaytardi → /api/json sinab ko'riladi)
+    "https://cobalt.drgns.space",            # v7 (405 qaytardi → /api/json sinab ko'riladi)
+    "https://cobaltapi.void.cat",            # community
+    "https://co.wuk.sh",                     # community
+    "https://api.cobalt.tools",              # rasmiy v10; COBALT_API_KEY talab qiladi
 ]
 
 # Progressive stream itag → balandlik (audio+video birlashtirilgan, merge kerak emas)
@@ -1074,74 +1079,96 @@ async def _cobalt_video(video_id: str, max_height: int) -> str:
     """
     Cobalt API orqali YouTube video yuklab oladi.
 
-    Cobalt o'z serverlarida YouTube'dan stream URL'ni oladi,
-    so'ng Railway'dan yuklab olish uchun tunnel/redirect URL qaytaradi.
-    Railway IP bloklanganda ham ishlaydi, chunki Cobalt serverlari boshqacha.
+    Cobalt o'z serverlaridan YouTube stream URL'ni oladi.
+    Proxy ISHLATILMAYDI — Cobalt Railway IPni bloklaydi, proxy esa 502 beradi.
 
-    API: POST / — {"url": "...", "videoQuality": "720", "downloadMode": "auto"}
-    Javob: {"status": "tunnel"|"redirect", "url": "..."}
+    API versiyalari:
+      v10 (yangi): POST /         {"url","videoQuality","downloadMode"}
+      v7  (eski):  POST /api/json {"url","vQuality","isAudioOnly"}
+
+    Rasmiyl instance (api.cobalt.tools) JWT talab qiladi.
+    COBALT_API_KEY o'rnatilsa — Authorization: Api-Key header qo'shiladi.
     """
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     quality     = _cobalt_quality(max_height)
-    # Minimal payload — ba'zi instance'lar noto'g'ri fieldlarni rad etadi
-    payload     = {
-        "url":          youtube_url,
-        "videoQuality": quality,
-        "downloadMode": "auto",
-    }
-    _api_proxy = PROXY_URL or None
+
+    payload_v10 = {"url": youtube_url, "videoQuality": quality, "downloadMode": "auto"}
+    payload_v7  = {"url": youtube_url, "vQuality":     quality, "isAudioOnly": False}
 
     for instance in COBALT_INSTANCES:
+        data: dict | None = None
         try:
-            logger.info(f"[Cobalt] {instance} → {video_id} ({quality}p)")
+            # JWT auth faqat rasmiy instance uchun
+            headers = dict(_COBALT_HEADERS)
+            if COBALT_API_KEY and "api.cobalt.tools" in instance:
+                headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+                logger.info(f"[Cobalt] {instance} → {video_id} ({quality}p) [JWT]")
+            else:
+                logger.info(f"[Cobalt] {instance} → {video_id} ({quality}p)")
 
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as session:
-                async with session.post(
-                    instance,
-                    json=payload,
-                    headers=_COBALT_HEADERS,
-                    proxy=_api_proxy,
-                    ssl=False,          # community instance'larda sertifikat muammolari
-                ) as resp:
-                    if resp.status == 429:
-                        logger.warning(f"[Cobalt] {instance}: rate limit (429)")
-                        continue
-                    if resp.status != 200:
-                        body = ""
-                        try:
-                            body = (await resp.text())[:120]
-                        except Exception:
-                            pass
-                        logger.warning(
-                            f"[Cobalt] {instance}: HTTP {resp.status} — {body}"
-                        )
-                        continue
-                    ct = resp.headers.get("Content-Type", "")
-                    if "json" not in ct.lower():
-                        logger.warning(
-                            f"[Cobalt] {instance}: JSON kutildi, lekin '{ct}' keldi"
-                        )
-                        continue
-                    data = await resp.json(content_type=None)
+            # v10 → fallback v7
+            for ep, pl in [("/", payload_v10), ("/api/json", payload_v7)]:
+                api_url = instance.rstrip("/") + ep
+                try:
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=20)
+                    ) as session:
+                        async with session.post(
+                            api_url, json=pl, headers=headers, ssl=False
+                        ) as resp:
+                            if resp.status in (404, 405):
+                                # Eski versiya — boshqa endpoint sinab ko'riladi
+                                logger.debug(
+                                    f"[Cobalt] {instance}{ep}: {resp.status} "
+                                    f"→ v7 endpoint sinab ko'rilmoqda"
+                                )
+                                continue
+                            if resp.status == 429:
+                                logger.warning(f"[Cobalt] {instance}: rate limit")
+                                break
+                            if resp.status != 200:
+                                body = ""
+                                try:
+                                    body = (await resp.text())[:150]
+                                except Exception:
+                                    pass
+                                logger.warning(
+                                    f"[Cobalt] {instance}{ep}: "
+                                    f"HTTP {resp.status} — {body}"
+                                )
+                                break  # Boshqa endpoint sinab ko'rishning ma'nosi yo'q
+                            data = await resp.json(content_type=None)
+                            break  # Muvaffaqiyatli javob olindi
+                except (asyncio.TimeoutError, aiohttp.ClientError) as conn_exc:
+                    logger.warning(
+                        f"[Cobalt] {instance}{ep}: "
+                        f"{type(conn_exc).__name__}: {conn_exc}"
+                    )
+                    break  # Ulanish xatosi — instance'ni o'tkazib yuboramiz
 
+            if data is None:
+                continue
+
+            # Javobni tahlil qilish (v7 va v10 bir xil format)
             status = data.get("status", "")
             if status == "error":
                 err_obj = data.get("error", data.get("text", ""))
-                if isinstance(err_obj, dict):
-                    code = err_obj.get("code", str(err_obj))
-                else:
-                    code = str(err_obj)
+                code    = (
+                    err_obj.get("code", str(err_obj))
+                    if isinstance(err_obj, dict)
+                    else str(err_obj)
+                )
                 logger.warning(f"[Cobalt] {instance}: API xatosi → {code}")
                 continue
 
             dl_url = data.get("url")
             if not dl_url:
-                logger.warning(f"[Cobalt] {instance}: javobda URL yo'q ({status}) — {data}")
+                logger.warning(
+                    f"[Cobalt] {instance}: URL yo'q ({status}) — {str(data)[:100]}"
+                )
                 continue
 
-            logger.info(f"[Cobalt] {instance}: {status} → yuklab olinmoqda...")
+            logger.info(f"[Cobalt] {status} → yuklab olinmoqda...")
 
             fid = uuid.uuid4().hex[:10]
             out = os.path.join(DOWNLOAD_PATH, f"vid_{fid}.mp4")
@@ -1179,63 +1206,80 @@ async def _cobalt_audio(video_id: str, bitrate: str) -> str:
     """
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     bitrate_num = bitrate.rstrip("kK")
-    payload     = {
-        "url":          youtube_url,
-        "downloadMode": "audio",
-        "audioFormat":  "mp3",
-        "audioBitrate": bitrate_num,
+
+    payload_v10 = {
+        "url": youtube_url, "downloadMode": "audio",
+        "audioFormat": "mp3", "audioBitrate": bitrate_num,
     }
-    _api_proxy = PROXY_URL or None
+    payload_v7 = {
+        "url": youtube_url, "isAudioOnly": True, "aFormat": "mp3",
+    }
 
     for instance in COBALT_INSTANCES:
+        data: dict | None = None
         try:
-            logger.info(f"[Cobalt audio] {instance} → {video_id} ({bitrate})")
+            headers = dict(_COBALT_HEADERS)
+            if COBALT_API_KEY and "api.cobalt.tools" in instance:
+                headers["Authorization"] = f"Api-Key {COBALT_API_KEY}"
+                logger.info(f"[Cobalt audio] {instance} → {video_id} [JWT]")
+            else:
+                logger.info(f"[Cobalt audio] {instance} → {video_id}")
 
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as session:
-                async with session.post(
-                    instance,
-                    json=payload,
-                    headers=_COBALT_HEADERS,
-                    proxy=_api_proxy,
-                    ssl=False,
-                ) as resp:
-                    if resp.status == 429:
-                        logger.warning(f"[Cobalt audio] {instance}: rate limit")
-                        continue
-                    if resp.status != 200:
-                        body = ""
-                        try:
-                            body = (await resp.text())[:120]
-                        except Exception:
-                            pass
-                        logger.warning(
-                            f"[Cobalt audio] {instance}: HTTP {resp.status} — {body}"
-                        )
-                        continue
-                    ct = resp.headers.get("Content-Type", "")
-                    if "json" not in ct.lower():
-                        logger.warning(
-                            f"[Cobalt audio] {instance}: JSON kutildi, lekin '{ct}'"
-                        )
-                        continue
-                    data = await resp.json(content_type=None)
+            for ep, pl in [("/", payload_v10), ("/api/json", payload_v7)]:
+                api_url = instance.rstrip("/") + ep
+                try:
+                    async with aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=20)
+                    ) as session:
+                        async with session.post(
+                            api_url, json=pl, headers=headers, ssl=False
+                        ) as resp:
+                            if resp.status in (404, 405):
+                                logger.debug(
+                                    f"[Cobalt audio] {instance}{ep}: {resp.status}"
+                                )
+                                continue
+                            if resp.status == 429:
+                                logger.warning(f"[Cobalt audio] {instance}: rate limit")
+                                break
+                            if resp.status != 200:
+                                body = ""
+                                try:
+                                    body = (await resp.text())[:150]
+                                except Exception:
+                                    pass
+                                logger.warning(
+                                    f"[Cobalt audio] {instance}{ep}: "
+                                    f"HTTP {resp.status} — {body}"
+                                )
+                                break
+                            data = await resp.json(content_type=None)
+                            break
+                except (asyncio.TimeoutError, aiohttp.ClientError) as conn_exc:
+                    logger.warning(
+                        f"[Cobalt audio] {instance}{ep}: "
+                        f"{type(conn_exc).__name__}: {conn_exc}"
+                    )
+                    break
+
+            if data is None:
+                continue
 
             status = data.get("status", "")
             if status == "error":
                 err_obj = data.get("error", data.get("text", ""))
-                if isinstance(err_obj, dict):
-                    code = err_obj.get("code", str(err_obj))
-                else:
-                    code = str(err_obj)
+                code    = (
+                    err_obj.get("code", str(err_obj))
+                    if isinstance(err_obj, dict)
+                    else str(err_obj)
+                )
                 logger.warning(f"[Cobalt audio] {instance}: API xatosi → {code}")
                 continue
 
             dl_url = data.get("url")
             if not dl_url:
                 logger.warning(
-                    f"[Cobalt audio] {instance}: URL yo'q ({status}) — {data}"
+                    f"[Cobalt audio] {instance}: URL yo'q ({status}) — {str(data)[:100]}"
                 )
                 continue
 
