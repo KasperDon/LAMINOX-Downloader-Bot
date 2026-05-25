@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Tizim paketlari: FFmpeg (audio ajratish) + curl (health check)
+# Tizim paketlari: FFmpeg (video/audio), curl (health check)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         curl \
@@ -8,17 +8,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Avval faqat requirements — layer cache uchun
+# Avval faqat requirements — Docker layer cache uchun
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Qolgan kod
 COPY . .
 
-# Ishlash papkalari
+# Ishlash papkalarini yaratish
 RUN mkdir -p downloads logs
 
+# Python optimizatsiyalari
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    TZ=Asia/Tashkent
 
-CMD ["python", "bot.py"]
+# Startup: yt-dlp ni har ishga tushganda yangilaymiz
+# (YouTube va boshqa platformalar tez-tez o'zgaradi)
+CMD ["sh", "-c", "pip install -q --upgrade yt-dlp && python bot.py"]

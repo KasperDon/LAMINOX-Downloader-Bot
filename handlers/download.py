@@ -10,11 +10,16 @@ Video va MP3 yuklab olish — 2 xil rejim:
     Link → platforma aniqlanadi → format so'raladi → yuklab olish
 
 Video yuklash strategiyasi (50 MB limit):
-  1. 720p yuklab olish → FFmpeg CRF-28 siqish (+ ixtiyoriy watermark)
-  2. Agar ≤ 50 MB bo'lsa → yuborish ✅
-  3. Aks holda 480p bilan qayta urinish
-  4. Kerak bo'lsa 360p
-  5. Barchasi katta bo'lsa → xatolik
+  ┌─ 1. 720p yuklab olish → FFmpeg CRF-28 siqish (+ ixtiyoriy watermark)
+  │     Agar ≤ 50 MB  → send_video ✅
+  │     Agar > 50 MB  → 480p bilan qayta
+  ├─ 2. 480p → FFmpeg → hajm tekshiruvi
+  │     Agar > 50 MB  → 360p bilan qayta
+  └─ 3. 360p → FFmpeg → send_video yoki send_document (fallback)
+
+YouTube xatolari:
+  YouTubeAuthError    → professional xabar (cookies kerak)
+  PermanentDownloadError → video mavjud emas/himoyalangan
 
 Admin bildirish:
   Har bir muvaffaqiyatli yuklab olishdan keyin adminlarga xabar yuboriladi.
@@ -25,6 +30,7 @@ import os
 import time
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -42,6 +48,7 @@ from utils.database import increment_downloads, log_download
 from utils.downloader import (
     QUALITY_PRESETS,
     PermanentDownloadError,
+    YouTubeAuthError,
     detect_platform,
     download_audio,
     download_raw_video,
@@ -62,13 +69,16 @@ _PLATFORM_EMOJI: dict[str, str] = {
 # Anti-spam: user_id → oxirgi so'rov vaqti (monotonic)
 _cooldowns: dict[int, float] = {}
 
+# Katta video threshold: agar send_video ishlamasa, send_document sinaydi
+_DOC_FALLBACK_SIZE = MAX_FILE_SIZE  # 50 MB
+
 
 # ── FSM holatlari ─────────────────────────────────────────
 
 class DLState(StatesGroup):
-    waiting_video_url = State()   # Tugma bosildi, link kutilmoqda
-    waiting_audio_url = State()   # Tugma bosildi, link kutilmoqda
-    waiting_format    = State()   # Link keldi, format kutilmoqda
+    waiting_video_url = State()
+    waiting_audio_url = State()
+    waiting_format    = State()
 
 
 # ── Cooldown ──────────────────────────────────────────────
@@ -83,13 +93,15 @@ def _set_cooldown(user_id: int) -> None:
 
 
 # ══════════════════════════════════════════════════════════
-# YADRO: video yuklab olish (cascading quality)
+# YADRO: video yuklab olish (cascading quality + doc fallback)
 # ══════════════════════════════════════════════════════════
 
 async def _do_video(ref: Message, user, url: str, platform: str) -> None:
     """
     Video yuklab olib, FFmpeg bilan siqib (+ watermark), Telegramga yuboradi.
+
     Agar 50 MB dan katta bo'lsa, avtomatik pastroq sifatda qayta urinadi.
+    Agar send_video ishlamasa, send_document (fayl sifatida) yuboradi.
     """
     emoji    = _PLATFORM_EMOJI.get(platform, "🌐")
     wm_label = "  ·  🎨 watermark" if WATERMARK_ENABLED else ""
@@ -100,45 +112,43 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
         f"🔄 Iltimos kuting..."
     )
 
-    raw_path: str | None = None   # yt-dlp tomonidan yuklangan xom MP4
-    out_path: str | None = None   # FFmpeg tomonidan qayta ishlangan MP4
-    send_path: str | None = None  # Telegramga yuborilish uchun fayl
-    send_size: int = 0
+    raw_path: str | None  = None
+    out_path: str | None  = None
+    send_path: str | None = None
+    send_size: int        = 0
 
     try:
         for i, (quality_label, fmt) in enumerate(QUALITY_PRESETS):
 
-            # ── Keyingi urinish uchun xabar ───────────────
+            # ── Keyingi sifat uchun xabar ─────────────────
             if i > 0:
                 await status.edit_text(
-                    f"📐 <b>Video hajmi katta, {quality_label}da qayta tayyorlanmoqda...</b>\n\n"
+                    f"📐 <b>Video hajmi katta — {quality_label}da qayta tayyorlanmoqda...</b>\n\n"
                     f"{emoji} <b>{platform.capitalize()}</b>  →  📹 MP4\n\n"
                     f"🔄 Iltimos kuting..."
                 )
-                # Oldingi xom faylni o'chirish
                 if raw_path:
                     await cleanup_file(raw_path)
                     raw_path = None
 
-            # ── 1. yt-dlp: xom video yuklab olish ─────────
+            # ── 1. yt-dlp: xom video ──────────────────────
             try:
                 raw_path = await download_raw_video(url, fmt)
-            except PermanentDownloadError:
-                raise  # Qayta urinish befoyda
+            except (YouTubeAuthError, PermanentDownloadError):
+                raise  # Bu xatolar retry bilan hal bo'lmaydi
             except Exception:
                 if i < len(QUALITY_PRESETS) - 1:
-                    continue   # Keyingi sifatni sinab ko'r
-                raise          # Oxirgi urinish ham muvaffaqiyatsiz
+                    continue
+                raise
 
-            # ── 2. FFmpeg: siqish (+ ixtiyoriy watermark) ─
+            # ── 2. FFmpeg: siqish + watermark (bir o'tish) ─
             await status.edit_text(
-                f"⚙️ <b>{quality_label}: siqilmoqda"
+                f"⚙️ <b>{quality_label}: tayyorlanmoqda"
                 f"{'  · 🎨 watermark' if WATERMARK_ENABLED else ''}...</b>\n\n"
                 f"{emoji} <b>{platform.capitalize()}</b>  →  📹 MP4\n\n"
                 f"🔄 Iltimos kuting..."
             )
 
-            # Oldingi FFmpeg natijasini tozalash
             if out_path and out_path != raw_path:
                 await cleanup_file(out_path)
             out_path = None
@@ -147,28 +157,28 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
                 out_path = await process_video(raw_path, watermark=WATERMARK_ENABLED)
             except Exception as ffmpeg_err:
                 logger.warning(
-                    f"FFmpeg xatolik ({quality_label}): {ffmpeg_err} — xom fayl yuboriladi"
+                    f"FFmpeg xatolik ({quality_label}): {ffmpeg_err} — xom fayl ishlatiladi"
                 )
-                out_path = raw_path   # Fallback: watermarksiz original
+                out_path = raw_path  # FFmpeg ishlamasa, xom faylni yuborish
 
             # ── 3. Hajm tekshiruvi ─────────────────────────
             size = os.path.getsize(out_path)
+            logger.info(
+                f"Hajm tekshiruvi [{quality_label}]: "
+                f"{size / (1024*1024):.1f} MB / 50 MB limit"
+            )
 
             if size <= MAX_FILE_SIZE:
                 send_path = out_path
                 send_size = size
-                break   # Bu sifat mos keldi ✅
+                break
 
-            # Hali ham katta → keyingi sifatni sinab ko'r
-            logger.info(
-                f"{quality_label} siqilgandan keyin ham katta: "
-                f"{size / (1024*1024):.1f} MB > 50 MB"
-            )
+            # Hali katta → keyingi sifat
             if out_path != raw_path:
                 await cleanup_file(out_path)
             out_path = None
 
-        # ── Barcha sifatlar katta bo'lib qoldi ────────────
+        # ── Barcha sifatlar exhausted ─────────────────────
         if send_path is None:
             await status.edit_text(
                 "❌ <b>Video hajmi juda katta!</b>\n\n"
@@ -180,30 +190,67 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
             return
 
         # ── 4. Telegramga yuborish ─────────────────────────
-        await status.edit_text(f"📤 <b>Yuborilmoqda...</b>  ({format_size(send_size)})")
+        await status.edit_text(
+            f"📤 <b>Yuborilmoqda...</b>  ({format_size(send_size)})"
+        )
 
         wm_badge = "  ·  🎨 Watermark" if WATERMARK_ENABLED else ""
-        await ref.answer_video(
-            video=FSInputFile(send_path),
-            caption=(
-                f"✅ <b>Muvaffaqiyatli yuklandi!</b>\n\n"
-                f"{emoji} Platforma: <b>{platform.capitalize()}</b>\n"
-                f"📦 Hajm: <b>{format_size(send_size)}</b>{wm_badge}\n\n"
-                f"🤖 @laminox"
-            ),
+        caption  = (
+            f"✅ <b>Muvaffaqiyatli yuklandi!</b>\n\n"
+            f"{emoji} Platforma: <b>{platform.capitalize()}</b>\n"
+            f"📦 Hajm: <b>{format_size(send_size)}</b>{wm_badge}\n\n"
+            f"🤖 @laminox"
+        )
+
+        sent = False
+
+        # send_video — Telegram ichida to'g'ridan-to'g'ri o'ynaydi
+        try:
+            await ref.answer_video(
+                video=FSInputFile(send_path),
+                caption=caption,
+                reply_markup=main_menu_keyboard(),
+            )
+            sent = True
+        except TelegramAPIError as api_err:
+            logger.warning(
+                f"send_video muvaffaqiyatsiz: {api_err} — send_document sinab ko'riladi"
+            )
+
+        # send_document fallback — video player ishlamasa fayl sifatida yuboradi
+        if not sent:
+            try:
+                await ref.answer_document(
+                    document=FSInputFile(send_path),
+                    caption=caption + "\n\n<i>📎 Fayl sifatida yuborildi</i>",
+                    reply_markup=main_menu_keyboard(),
+                )
+                sent = True
+            except TelegramAPIError as doc_err:
+                logger.error(f"send_document ham muvaffaqiyatsiz: {doc_err}")
+                raise Exception(str(doc_err))
+
+        if sent:
+            await status.delete()
+
+            # ── 5. DB + Admin notification ─────────────────
+            await increment_downloads(user.id)
+            await log_download(user.id, platform, "video", url)
+            try:
+                await notify_download(ref.bot, user, platform, "video", send_size, url)
+            except Exception as notify_err:
+                logger.debug(f"Notification xatolik: {notify_err}")
+
+    except YouTubeAuthError:
+        logger.warning(f"YouTube auth xatolik [{platform}]: bot taniqlash")
+        await status.edit_text(
+            "⚠️ <b>YouTube vaqtincha ishlamayapti!</b>\n\n"
+            "YouTube bot taniqlash tizimini ishga tushirdi.\n\n"
+            "Admin <code>cookies.txt</code> faylini serverga "
+            "joylashtirishi kerak.\n\n"
+            "🔄 Bir oz vaqt o'tgach qayta urinib ko'ring.",
             reply_markup=main_menu_keyboard(),
         )
-        await status.delete()
-
-        # ── 5. DB logi + Admin xabarnomasi ────────────────
-        await increment_downloads(user.id)
-        await log_download(user.id, platform, "video", url)
-
-        try:
-            await notify_download(ref.bot, user, platform, "video", send_size, url)
-        except Exception as notify_err:
-            logger.debug(f"Notification xatolik: {notify_err}")
-
     except PermanentDownloadError as exc:
         logger.warning(f"Permanent xato [{platform}]: {exc}")
         await status.edit_text(
@@ -212,13 +259,12 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
             reply_markup=main_menu_keyboard(),
         )
     except Exception as exc:
-        logger.error(f"Video xatolik [{platform}]: {exc}")
+        logger.error(f"Video xatolik [{platform}]: {exc}", exc_info=True)
         await status.edit_text(
             f"❌ <b>Xatolik yuz berdi!</b>\n\n{user_friendly_error(str(exc))}",
             reply_markup=main_menu_keyboard(),
         )
     finally:
-        # Barcha vaqtinchalik fayllarni tozalash
         if raw_path:
             await cleanup_file(raw_path)
         if out_path and out_path != raw_path:
@@ -246,7 +292,7 @@ async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
         if size > MAX_FILE_SIZE:
             await status.edit_text(
                 "❌ <b>Fayl juda katta!</b>\n\n"
-                "Telegram 50 MB chekloviga ega.",
+                "Audio 50 MB dan oshib ketdi.",
                 reply_markup=main_menu_keyboard(),
             )
             return
@@ -265,17 +311,30 @@ async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
         )
         await status.delete()
 
-        # DB logi + Admin xabarnomasi
         await increment_downloads(user.id)
         await log_download(user.id, platform, "audio", url)
-
         try:
             await notify_download(ref.bot, user, platform, "audio", size, url)
         except Exception as notify_err:
             logger.debug(f"Notification xatolik: {notify_err}")
 
+    except YouTubeAuthError:
+        await status.edit_text(
+            "⚠️ <b>YouTube vaqtincha ishlamayapti!</b>\n\n"
+            "YouTube bot taniqlash tizimini ishga tushirdi.\n\n"
+            "Admin <code>cookies.txt</code> faylini serverga "
+            "joylashtirishi kerak.\n\n"
+            "🔄 Keyinroq qayta urinib ko'ring.",
+            reply_markup=main_menu_keyboard(),
+        )
+    except PermanentDownloadError as exc:
+        await status.edit_text(
+            f"❌ <b>Kontent mavjud emas yoki himoyalangan!</b>\n\n"
+            f"{user_friendly_error(str(exc))}",
+            reply_markup=main_menu_keyboard(),
+        )
     except Exception as exc:
-        logger.error(f"Audio xatolik [{platform}]: {exc}")
+        logger.error(f"Audio xatolik [{platform}]: {exc}", exc_info=True)
         await status.edit_text(
             f"❌ <b>Xatolik yuz berdi!</b>\n\n{user_friendly_error(str(exc))}",
             reply_markup=main_menu_keyboard(),
@@ -368,7 +427,6 @@ async def cb_fmt_audio(callback: CallbackQuery, state: FSMContext) -> None:
     await _do_audio(callback.message, callback.from_user, url, platform)
 
 
-# waiting_format holatida boshqa matn kelsa
 @router.message(DLState.waiting_format)
 async def handle_text_while_choosing(message: Message) -> None:
     await message.answer(

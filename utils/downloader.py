@@ -3,17 +3,20 @@ utils/downloader.py
 ───────────────────
 yt-dlp orqali media yuklash — anti-bot himoya bilan.
 
-  QUALITY_PRESETS       — video sifat darajalari (720p → 480p → 360p)
-  download_raw_video()  — berilgan yt-dlp format bilan xom MP4 yuklab oladi
-  download_audio()      — MP3 128 kbps yuklab ajratib beradi
-  detect_platform()     — platformani aniqlaydi
-  PermanentDownloadError — qayta urinish befoyda bo'lgan holatlar
+Istisnolar:
+  PermanentDownloadError  — video mavjud emas / geo-blocked / copyright
+  YouTubeAuthError        — YouTube bot taniqladi, cookies kerak
+  Exception               — vaqtinchalik tarmoq yoki format xatoligi
 
-Anti-bot himoya:
-  • To'liq brauzer sarlavhalari (User-Agent, Accept-Language, Referer, ...)
-  • YouTube player_client: web + android + ios (navbatma-navbat)
-  • sleep_interval: so'rovlar orasida kutish
-  • Agar cookies.txt mavjud bo'lsa — avtomatik ishlatiladi
+Anti-bot strategiya:
+  1. To'liq Chrome brauzer sarlavhalari
+  2. YouTube player_client: web + android + ios
+  3. so'rovlar orasida 1-3 soniya pauza
+  4. retry: 5 urinish, fragment_retries: 5
+  5. cookies.txt mavjud bo'lsa avtomatik ishlatiladi
+
+Sifat darajalari (QUALITY_PRESETS):
+  720p → 480p → 360p (handler mos sifat topilgunga qadar sinaydi)
 """
 
 import asyncio
@@ -64,8 +67,8 @@ _HEADERS: dict[str, str] = {
 # ──────────────────────────────────────────────────────────
 
 _PLATFORM_MAP = {
-    ("youtube.com", "youtu.be"): "youtube",
-    ("instagram.com",):          "instagram",
+    ("youtube.com", "youtu.be"):                       "youtube",
+    ("instagram.com",):                                "instagram",
     ("tiktok.com", "vm.tiktok.com", "vt.tiktok.com"): "tiktok",
 }
 
@@ -115,7 +118,21 @@ QUALITY_PRESETS: list[tuple[str, str]] = [
     ),
 ]
 
-# Permanent xatolar uchun kalit so'zlar
+# ──────────────────────────────────────────────────────────
+# Xato turlari
+# ──────────────────────────────────────────────────────────
+
+# YouTube bot taniqlash xatosi uchun kalit so'zlar
+_BOT_DETECTION_KEYWORDS = (
+    "sign in to confirm",
+    "confirm you're not a bot",
+    "not a bot",
+    "bot detection",
+    "please sign in",
+    "verification",
+)
+
+# Permanent xatolar — qayta urinish befoyda
 _PERMANENT_KEYWORDS = (
     "private", "unavailable", "removed", "not available",
     "geo", "restricted", "age", "copyright", "404",
@@ -126,6 +143,13 @@ _PERMANENT_KEYWORDS = (
 
 class PermanentDownloadError(Exception):
     """Video mavjud emas, himoyalangan yoki geo-blocked — retry befoyda."""
+
+
+class YouTubeAuthError(Exception):
+    """
+    YouTube bot taniqlash tizimi ishga tushdi.
+    cookies.txt fayli qo'shilishi yoki yangilanishi kerak.
+    """
 
 
 # ──────────────────────────────────────────────────────────
@@ -142,8 +166,7 @@ def _cookie_opts() -> dict:
         return {"cookiefile": COOKIES_PATH}
     if YOUTUBE_COOKIES_ENABLED and not os.path.exists(COOKIES_PATH):
         logger.debug(
-            f"YOUTUBE_COOKIES_ENABLED=true lekin {COOKIES_PATH} topilmadi — "
-            "cookiesiz davom etiladi"
+            f"YOUTUBE_COOKIES_ENABLED=true lekin '{COOKIES_PATH}' topilmadi"
         )
     return {}
 
@@ -151,41 +174,33 @@ def _cookie_opts() -> dict:
 def _common_opts() -> dict:
     """
     Barcha yuklab olishlarda ishlatiladigan asosiy sozlamalar:
-      - To'liq brauzer sarlavhalari
-      - YouTube player_client: web + android + ios
-      - Retry va uyqu oraliq vaqtlari
-      - Cookies (agar mavjud bo'lsa)
+    brauzer sarlavhalari, retry, sleep interval, YouTube player clients.
     """
     opts: dict = {
-        # ── Umumiy ────────────────────────────────────────
-        "quiet":            True,
-        "no_warnings":      True,
-        "socket_timeout":   60,
+        "quiet":               True,
+        "no_warnings":         True,
+        "socket_timeout":      60,
 
-        # ── Retry sozlamalari ──────────────────────────────
-        "retries":          5,
-        "fragment_retries": 5,
+        # Retry
+        "retries":             5,
+        "fragment_retries":    5,
         "file_access_retries": 3,
 
-        # ── Bot aniqlashga qarshi uyqu ─────────────────────
-        # Har bir so'rov orasida 1–3 soniya kutadi
-        "sleep_interval":      1,
-        "max_sleep_interval":  3,
+        # Bot taniqlashga qarshi pauza (so'rovlar orasida)
+        "sleep_interval":          1,
+        "max_sleep_interval":      3,
         "sleep_interval_requests": 1,
 
-        # ── Brauzer sarlavhalari ──────────────────────────
+        # Brauzer sarlavhalari
         "http_headers": _HEADERS,
 
-        # ── YouTube maxsus sozlamalar ─────────────────────
-        # player_client: web (cookiessiz ham ishlaydi),
-        #   android va ios — zaxira variantlar
+        # YouTube: bir nechta player client, navbatma-navbat sinaydi
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "android", "ios"],
             }
         },
     }
-    # Cookies fayl mavjud bo'lsa qo'shib qo'y
     opts.update(_cookie_opts())
     return opts
 
@@ -205,6 +220,16 @@ def _find_output_file(directory: str, prefix: str) -> Optional[str]:
     return None
 
 
+def _classify_error(msg: str) -> str:
+    """Xato xabarini tahlil qiladi: 'bot', 'permanent', yoki 'temp'."""
+    lower = msg.lower()
+    if any(kw in lower for kw in _BOT_DETECTION_KEYWORDS):
+        return "bot"
+    if any(kw in lower for kw in _PERMANENT_KEYWORDS):
+        return "permanent"
+    return "temp"
+
+
 # ──────────────────────────────────────────────────────────
 # Video yuklab olish (xom, FFmpeg siqishsiz)
 # ──────────────────────────────────────────────────────────
@@ -215,6 +240,7 @@ async def download_raw_video(url: str, fmt: str) -> str:
 
     Qaytaradi: MP4 fayl yo'li (mutlaq).
     Ko'taradi:
+      YouTubeAuthError       — YouTube bot taniqladi (cookies kerak)
       PermanentDownloadError — video mavjud emas / himoyalangan
       Exception              — vaqtinchalik xato (qayta urinish mumkin)
     """
@@ -230,7 +256,7 @@ async def download_raw_video(url: str, fmt: str) -> str:
         "merge_output_format": "mp4",
     })
 
-    result: dict = {"path": None, "error": None, "permanent": False}
+    result: dict = {"path": None, "error": None, "error_type": "temp"}
 
     def _run() -> None:
         try:
@@ -246,8 +272,8 @@ async def download_raw_video(url: str, fmt: str) -> str:
                     result["path"] = mp4
         except yt_dlp.utils.DownloadError as exc:
             msg = str(exc)
-            result["error"]     = msg
-            result["permanent"] = any(kw in msg.lower() for kw in _PERMANENT_KEYWORDS)
+            result["error"]      = msg
+            result["error_type"] = _classify_error(msg)
         except Exception as exc:
             result["error"] = str(exc)
 
@@ -255,7 +281,10 @@ async def download_raw_video(url: str, fmt: str) -> str:
     await loop.run_in_executor(None, _run)
 
     if result["error"]:
-        if result["permanent"]:
+        err_type = result["error_type"]
+        if err_type == "bot":
+            raise YouTubeAuthError(result["error"])
+        if err_type == "permanent":
             raise PermanentDownloadError(result["error"])
         raise Exception(result["error"])
 
@@ -301,7 +330,7 @@ async def download_audio(url: str) -> str:
         ],
     })
 
-    result: dict = {"path": None, "error": None}
+    result: dict = {"path": None, "error": None, "error_type": "temp"}
 
     def _run() -> None:
         try:
@@ -316,7 +345,9 @@ async def download_audio(url: str) -> str:
                 if os.path.exists(mp3):
                     result["path"] = mp3
         except yt_dlp.utils.DownloadError as exc:
-            result["error"] = str(exc)
+            msg = str(exc)
+            result["error"]      = msg
+            result["error_type"] = _classify_error(msg)
         except Exception as exc:
             result["error"] = str(exc)
 
@@ -324,6 +355,11 @@ async def download_audio(url: str) -> str:
     await loop.run_in_executor(None, _run)
 
     if result["error"]:
+        err_type = result["error_type"]
+        if err_type == "bot":
+            raise YouTubeAuthError(result["error"])
+        if err_type == "permanent":
+            raise PermanentDownloadError(result["error"])
         raise Exception(result["error"])
 
     if result["path"] and os.path.exists(result["path"]):
