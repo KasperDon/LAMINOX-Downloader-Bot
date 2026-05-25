@@ -64,6 +64,15 @@ PIPED_INSTANCES: list[str] = [
     "https://piped-api.garudalinux.org",
 ]
 
+# Cobalt API instance'lari (github.com/imputnet/cobalt)
+# Cobalt YouTube'ni o'z serverlaridan yuklaydi — Railway IP bloklangan bo'lsa ham ishlaydi
+COBALT_INSTANCES: list[str] = [
+    "https://cobalt.api.timelessnesses.me",
+    "https://cobalt.urdh.dev",
+    "https://cobalt.drgns.space",
+    "https://api.cobalt.tools",               # Rate-limit bor, oxirgi sinab ko'riladi
+]
+
 # Progressive stream itag → balandlik (audio+video birlashtirilgan, merge kerak emas)
 _PROGRESSIVE_ITAGS: dict[int, int] = {22: 720, 59: 480, 18: 360, 17: 144}
 
@@ -1030,6 +1039,199 @@ async def _piped_video(video_id: str, max_height: int) -> str:
 
 
 # ──────────────────────────────────────────────────────────
+# Cobalt API: YouTube video / audio yuklab olish
+# ──────────────────────────────────────────────────────────
+
+_COBALT_HEADERS = {
+    "Accept":       "application/json",
+    "Content-Type": "application/json",
+    "User-Agent":   "Mozilla/5.0 (compatible; TelegramBot/1.0)",
+}
+
+_HEIGHT_TO_COBALT: dict[int, str] = {
+    1080: "1080", 720: "720", 480: "480",
+    360: "360",  240: "240", 144: "144",
+}
+
+
+def _cobalt_quality(max_height: int) -> str:
+    for h in sorted(_HEIGHT_TO_COBALT, reverse=True):
+        if max_height >= h:
+            return _HEIGHT_TO_COBALT[h]
+    return "360"
+
+
+async def _cobalt_video(video_id: str, max_height: int) -> str:
+    """
+    Cobalt API orqali YouTube video yuklab oladi.
+
+    Cobalt o'z serverlarida YouTube'dan stream URL'ni oladi,
+    so'ng Railway'dan yuklab olish uchun tunnel/redirect URL qaytaradi.
+    Railway IP bloklanganda ham ishlaydi, chunki Cobalt serverlari boshqacha.
+
+    API: POST / — {"url": "...", "videoQuality": "720", "downloadMode": "auto"}
+    Javob: {"status": "tunnel"|"redirect", "url": "..."}
+    """
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    quality     = _cobalt_quality(max_height)
+    payload     = {
+        "url":           youtube_url,
+        "videoQuality":  quality,
+        "downloadMode":  "auto",
+        "filenameStyle": "basic",
+    }
+
+    for instance in COBALT_INSTANCES:
+        try:
+            logger.info(f"[Cobalt] {instance} → {video_id} ({quality}p)")
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as session:
+                async with session.post(
+                    instance,
+                    json=payload,
+                    headers=_COBALT_HEADERS,
+                ) as resp:
+                    if resp.status == 429:
+                        logger.warning(f"[Cobalt] {instance}: rate limit (429)")
+                        continue
+                    if resp.status != 200:
+                        logger.warning(f"[Cobalt] {instance}: HTTP {resp.status}")
+                        continue
+                    ct = resp.headers.get("Content-Type", "")
+                    if "json" not in ct.lower():
+                        logger.warning(
+                            f"[Cobalt] {instance}: JSON kutildi, lekin '{ct}' keldi"
+                        )
+                        continue
+                    data = await resp.json()
+
+            status = data.get("status", "")
+            if status == "error":
+                code = data.get("error", {}).get("code", "unknown")
+                logger.warning(f"[Cobalt] {instance}: API xatosi → {code}")
+                continue
+
+            dl_url = data.get("url")
+            if not dl_url:
+                logger.warning(f"[Cobalt] {instance}: javobda URL yo'q ({status})")
+                continue
+
+            logger.info(f"[Cobalt] {instance}: {status} → yuklab olinmoqda...")
+
+            fid = uuid.uuid4().hex[:10]
+            out = os.path.join(DOWNLOAD_PATH, f"vid_{fid}.mp4")
+            os.makedirs(DOWNLOAD_PATH, exist_ok=True)
+
+            dl_timeout = aiohttp.ClientTimeout(total=300, sock_read=120)
+            async with aiohttp.ClientSession(timeout=dl_timeout) as session:
+                ok = await _download_stream(session, dl_url, out)
+
+            if ok:
+                size = os.path.getsize(out)
+                logger.info(f"✅ [Cobalt] {size // 1024} KB")
+                return out
+
+            try:
+                os.remove(out)
+            except Exception:
+                pass
+            logger.warning(f"[Cobalt] {instance}: fayl kichik/bo'sh")
+
+        except asyncio.TimeoutError:
+            logger.warning(f"[Cobalt] {instance}: timeout")
+        except Exception as exc:
+            logger.warning(f"[Cobalt] {instance}: {type(exc).__name__}: {exc}")
+
+    raise YouTubePlayerError(
+        f"Barcha Cobalt instance'lar muvaffaqiyatsiz ({video_id})"
+    )
+
+
+async def _cobalt_audio(video_id: str, bitrate: str) -> str:
+    """
+    Cobalt API orqali YouTube audio yuklab oladi (MP3).
+    bitrate: "128k" formatida.
+    """
+    youtube_url  = f"https://www.youtube.com/watch?v={video_id}"
+    bitrate_num  = bitrate.rstrip("kK")
+    payload      = {
+        "url":          youtube_url,
+        "downloadMode": "audio",
+        "audioFormat":  "mp3",
+        "audioBitrate": bitrate_num,
+        "filenameStyle": "basic",
+    }
+
+    for instance in COBALT_INSTANCES:
+        try:
+            logger.info(f"[Cobalt audio] {instance} → {video_id} ({bitrate})")
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as session:
+                async with session.post(
+                    instance,
+                    json=payload,
+                    headers=_COBALT_HEADERS,
+                ) as resp:
+                    if resp.status == 429:
+                        logger.warning(f"[Cobalt audio] {instance}: rate limit")
+                        continue
+                    if resp.status != 200:
+                        logger.warning(f"[Cobalt audio] {instance}: HTTP {resp.status}")
+                        continue
+                    ct = resp.headers.get("Content-Type", "")
+                    if "json" not in ct.lower():
+                        logger.warning(
+                            f"[Cobalt audio] {instance}: JSON kutildi, lekin '{ct}'"
+                        )
+                        continue
+                    data = await resp.json()
+
+            status = data.get("status", "")
+            if status == "error":
+                code = data.get("error", {}).get("code", "unknown")
+                logger.warning(f"[Cobalt audio] {instance}: API xatosi → {code}")
+                continue
+
+            dl_url = data.get("url")
+            if not dl_url:
+                logger.warning(f"[Cobalt audio] {instance}: URL yo'q ({status})")
+                continue
+
+            logger.info(f"[Cobalt audio] yuklab olinmoqda ({status})...")
+
+            fid = uuid.uuid4().hex[:10]
+            out = os.path.join(DOWNLOAD_PATH, f"aud_{fid}.mp3")
+            os.makedirs(DOWNLOAD_PATH, exist_ok=True)
+
+            dl_timeout = aiohttp.ClientTimeout(total=300, sock_read=120)
+            async with aiohttp.ClientSession(timeout=dl_timeout) as session:
+                ok = await _download_stream(session, dl_url, out)
+
+            if ok:
+                size = os.path.getsize(out)
+                logger.info(f"✅ [Cobalt audio] {size // 1024} KB")
+                return out
+
+            try:
+                os.remove(out)
+            except Exception:
+                pass
+
+        except asyncio.TimeoutError:
+            logger.warning(f"[Cobalt audio] {instance}: timeout")
+        except Exception as exc:
+            logger.warning(f"[Cobalt audio] {instance}: {type(exc).__name__}: {exc}")
+
+    raise YouTubePlayerError(
+        f"Barcha Cobalt audio instance'lar muvaffaqiyatsiz ({video_id})"
+    )
+
+
+# ──────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────
 
@@ -1061,9 +1263,17 @@ async def download_raw_video(url: str, fmt: str) -> str:
             try:
                 return await _piped_video(video_id, max_height)
             except YouTubePlayerError:
-                logger.info("[Piped] muvaffaqiyatsiz → yt-dlp...")
+                logger.info("[Piped] muvaffaqiyatsiz → Cobalt API...")
             except Exception as exc:
-                logger.warning(f"[Piped] xato: {exc} → yt-dlp...")
+                logger.warning(f"[Piped] xato: {exc} → Cobalt API...")
+
+            # 3-urinish: Cobalt API (o'z serverlarida YouTube'dan oladi)
+            try:
+                return await _cobalt_video(video_id, max_height)
+            except YouTubePlayerError:
+                logger.info("[Cobalt] muvaffaqiyatsiz → yt-dlp...")
+            except Exception as exc:
+                logger.warning(f"[Cobalt] xato: {exc} → yt-dlp...")
 
     # ── yt-dlp (Instagram/TikTok asosiy, YouTube oxirgi fallback) ──
     if PROXY_URL:
@@ -1089,18 +1299,23 @@ async def download_audio(url: str) -> str:
     bitrate_num = AUDIO_BITRATE.rstrip("kK")
     platform    = detect_platform(url)
 
-    # ── YouTube: Invidious birinchi ──────────────────────
+    # ── YouTube: Invidious → Cobalt → yt-dlp ────────────
     if platform == "youtube":
         video_id = _extract_youtube_id(url)
         if video_id:
             try:
                 return await _invidious_audio(video_id, f"{bitrate_num}k")
             except YouTubePlayerError:
-                logger.info("[Invidious audio] muvaffaqiyatsiz → yt-dlp sinab ko'rilmoqda...")
+                logger.info("[Invidious audio] muvaffaqiyatsiz → Cobalt audio...")
             except Exception as exc:
-                logger.warning(
-                    f"[Invidious audio] kutilmagan xato: {exc} → yt-dlp..."
-                )
+                logger.warning(f"[Invidious audio] xato: {exc} → Cobalt audio...")
+
+            try:
+                return await _cobalt_audio(video_id, f"{bitrate_num}k")
+            except YouTubePlayerError:
+                logger.info("[Cobalt audio] muvaffaqiyatsiz → yt-dlp...")
+            except Exception as exc:
+                logger.warning(f"[Cobalt audio] xato: {exc} → yt-dlp...")
 
     # ── yt-dlp fallback ──────────────────────────────────
     if PROXY_URL:
