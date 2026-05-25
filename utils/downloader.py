@@ -47,12 +47,13 @@ logger = logging.getLogger(__name__)
 
 INVIDIOUS_INSTANCES: list[str] = [
     "https://inv.nadeko.net",
-    "https://invidious.fdn.fr",
-    "https://yt.artemislena.eu",
     "https://invidious.nerdvpn.de",
     "https://invidious.private.coffee",
-    "https://invidious.protokolla.fi",
-    "https://iv.datura.network",
+    "https://inv.tux.pizza",
+    "https://invidious.incogniweb.net",
+    "https://inv.bp.projectsegfau.lt",
+    "https://invidious.no-logs.com",
+    "https://yt.drgnz.club",
 ]
 
 # Progressive stream itag → balandlik (audio+video birlashtirilgan, merge kerak emas)
@@ -361,8 +362,24 @@ async def _invidious_video(video_id: str, max_height: int) -> str:
                         continue
                     data = await resp.json()
 
-            # ── 1. Progressive stream (audio+video birlashtirilgan) ──────
+            # ── API javobini tekshirish ──────────────────────────────────
             prog_streams = data.get("formatStreams", [])
+            adaptive     = data.get("adaptiveFormats", [])
+
+            # Xato JSON bo'lsa (masalan: {"error": "Video unavailable"})
+            if "error" in data:
+                logger.warning(
+                    f"[Invidious] {instance}: API xatosi → {data['error']}"
+                )
+                continue
+
+            logger.info(
+                f"[Invidious] {instance}: "
+                f"formatStreams={len(prog_streams)}, "
+                f"adaptiveFormats={len(adaptive)}"
+            )
+
+            # ── 1. Progressive stream (audio+video birlashtirilgan) ──────
             best_prog, best_prog_h = None, 0
             for s in prog_streams:
                 h = _PROGRESSIVE_ITAGS.get(_safe_itag(s), 0)
@@ -399,7 +416,6 @@ async def _invidious_video(video_id: str, max_height: int) -> str:
                 )
 
             # ── 2. Adaptive stream (video + audio alohida, FFmpeg merge) ──
-            adaptive = data.get("adaptiveFormats", [])
 
             # Eng yaxshi video stream
             best_vid, best_vid_h = None, 0
@@ -841,16 +857,76 @@ async def download_raw_video(url: str, fmt: str) -> str:
         video_id = _extract_youtube_id(url)
         if video_id:
             max_height = _fmt_to_max_height(fmt)
+
+            # 1-urinish: Invidious API (to'g'ridan-to'g'ri stream yuklab olish)
             try:
                 return await _invidious_video(video_id, max_height)
             except YouTubePlayerError:
-                logger.info("[Invidious] muvaffaqiyatsiz → yt-dlp sinab ko'rilmoqda...")
+                logger.info("[Invidious API] muvaffaqiyatsiz → yt-dlp+Invidious URL...")
             except Exception as exc:
-                logger.warning(
-                    f"[Invidious] kutilmagan xato: {exc} → yt-dlp sinab ko'rilmoqda..."
-                )
+                logger.warning(f"[Invidious API] xato: {exc}")
 
-    # ── yt-dlp (Instagram/TikTok asosiy, YouTube fallback) ──
+            # 2-urinish: yt-dlp + Invidious URL (yt-dlp Invidious extractorini ishlatadi)
+            for inv_instance in INVIDIOUS_INSTANCES:
+                inv_url = f"{inv_instance}/watch?v={video_id}"
+                fid     = uuid.uuid4().hex[:10]
+                prefix  = f"vid_{fid}"
+                tpl     = os.path.join(DOWNLOAD_PATH, f"{prefix}.%(ext)s")
+
+                ytdlp_opts = {
+                    "quiet": True, "no_warnings": True,
+                    "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+                    "outtmpl": tpl, "merge_output_format": "mp4",
+                    "socket_timeout": 30, "retries": 2,
+                    "nocheckcertificate": True,
+                    "sleep_interval": 0, "max_sleep_interval": 0,
+                }
+
+                result: dict = {"path": None, "error": None}
+                logger.info(f"[Invidious yt-dlp] {inv_instance} → {video_id}")
+
+                def _run_inv(_o=ytdlp_opts, _r=result, _u=inv_url) -> None:
+                    try:
+                        with yt_dlp.YoutubeDL(_o) as ydl:
+                            info = ydl.extract_info(_u, download=True)
+                            if info:
+                                raw  = ydl.prepare_filename(info)
+                                base = os.path.splitext(raw)[0]
+                                mp4  = base + ".mp4"
+                                if os.path.exists(mp4):
+                                    _r["path"] = mp4
+                    except Exception as exc:
+                        _r["error"] = str(exc)
+
+                loop = asyncio.get_running_loop()
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, _run_inv),
+                        timeout=90.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[Invidious yt-dlp] {inv_instance}: 90s timeout")
+                    _cleanup_prefix(DOWNLOAD_PATH, prefix)
+                    continue
+
+                if result["path"] and os.path.exists(result["path"]):
+                    logger.info(f"✅ [Invidious yt-dlp] {inv_instance}")
+                    return result["path"]
+
+                found = _find_output_file(DOWNLOAD_PATH, prefix)
+                if found:
+                    logger.info(f"✅ [Invidious yt-dlp] {inv_instance} (found)")
+                    return found
+
+                if result["error"]:
+                    logger.debug(
+                        f"[Invidious yt-dlp] {inv_instance}: {result['error'][:80]}"
+                    )
+                _cleanup_prefix(DOWNLOAD_PATH, prefix)
+
+            logger.info("[Invidious yt-dlp] hammasi muvaffaqiyatsiz → yt-dlp YouTube URL...")
+
+    # ── yt-dlp (Instagram/TikTok asosiy, YouTube oxirgi fallback) ──
     if PROXY_URL:
         try:
             return await _video_per_client(url, fmt, proxy=PROXY_URL)
