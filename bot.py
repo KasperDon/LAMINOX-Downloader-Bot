@@ -99,10 +99,17 @@ async def main() -> None:
     bot_info = await bot.get_me()
     logger.info(f"🤖 Bot ishga tushdi: @{bot_info.username} (ID: {bot_info.id})")
 
+    # Webhook va pending updatelarni tozalash — ConflictError oldini oladi
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("✅ Webhook tozalandi, pending updatelar o'chirildi")
+    except Exception as wh_err:
+        logger.warning(f"delete_webhook xatolik (kritik emas): {wh_err}")
+
     try:
         await dp.start_polling(
             bot,
-            skip_updates=True,                          # Eski xabarlarni o'tkazib yubor
+            skip_updates=True,                               # Eski xabarlarni o'tkazib yubor
             allowed_updates=dp.resolve_used_update_types(),  # Faqat kerakli update turlari
         )
     except TelegramConflictError:

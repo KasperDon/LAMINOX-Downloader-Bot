@@ -49,6 +49,7 @@ from utils.downloader import (
     QUALITY_PRESETS,
     PermanentDownloadError,
     YouTubeAuthError,
+    YouTubePlayerError,
     detect_platform,
     download_audio,
     download_raw_video,
@@ -241,13 +242,24 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
             except Exception as notify_err:
                 logger.debug(f"Notification xatolik: {notify_err}")
 
+    except YouTubePlayerError:
+        logger.warning(f"YouTube player xatosi [{platform}]: barcha client'lar muvaffaqiyatsiz")
+        await status.edit_text(
+            "⚠️ <b>Ushbu YouTube video hozir yuklanmadi!</b>\n\n"
+            "YouTube server javob bermadi (barcha format urinishlari muvaffaqiyatsiz).\n\n"
+            "📌 Nima qilish mumkin:\n"
+            "• Boshqa <b>YouTube</b> linkni sinab ko'ring\n"
+            "• <b>Instagram</b> yoki <b>TikTok</b> link yuboring\n"
+            "• Bir necha daqiqadan so'ng qayta urinib ko'ring",
+            reply_markup=main_menu_keyboard(),
+        )
     except YouTubeAuthError:
         logger.warning(f"YouTube auth xatolik [{platform}]: bot taniqlash")
         await status.edit_text(
             "⚠️ <b>YouTube vaqtincha ishlamayapti!</b>\n\n"
             "YouTube bot taniqlash tizimini ishga tushirdi.\n\n"
             "Admin <code>cookies.txt</code> faylini serverga "
-            "joylashtirishi kerak.\n\n"
+            "joylashtirishi yoki yangilashi kerak.\n\n"
             "🔄 Bir oz vaqt o'tgach qayta urinib ko'ring.",
             reply_markup=main_menu_keyboard(),
         )
@@ -318,12 +330,22 @@ async def _do_audio(ref: Message, user, url: str, platform: str) -> None:
         except Exception as notify_err:
             logger.debug(f"Notification xatolik: {notify_err}")
 
+    except YouTubePlayerError:
+        await status.edit_text(
+            "⚠️ <b>Ushbu YouTube audio hozir yuklanmadi!</b>\n\n"
+            "YouTube server javob bermadi (barcha format urinishlari muvaffaqiyatsiz).\n\n"
+            "📌 Nima qilish mumkin:\n"
+            "• Boshqa <b>YouTube</b> linkni sinab ko'ring\n"
+            "• <b>Instagram</b> yoki <b>TikTok</b> link yuboring\n"
+            "• Bir necha daqiqadan so'ng qayta urinib ko'ring",
+            reply_markup=main_menu_keyboard(),
+        )
     except YouTubeAuthError:
         await status.edit_text(
             "⚠️ <b>YouTube vaqtincha ishlamayapti!</b>\n\n"
             "YouTube bot taniqlash tizimini ishga tushirdi.\n\n"
             "Admin <code>cookies.txt</code> faylini serverga "
-            "joylashtirishi kerak.\n\n"
+            "joylashtirishi yoki yangilashi kerak.\n\n"
             "🔄 Keyinroq qayta urinib ko'ring.",
             reply_markup=main_menu_keyboard(),
         )
