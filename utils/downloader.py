@@ -1,7 +1,17 @@
 """
 utils/downloader.py
 ───────────────────
-yt-dlp orqali media yuklash — per-client retry + proxy fallback bilan.
+yt-dlp orqali media yuklash — per-client retry + proxy fallback + timeout bilan.
+
+YouTube strategiyasi (2025):
+  YouTube datacenter IP'larini bloklamoqda.
+  Faqat PO token talab qilmaydigan clientlar ishlatiladi:
+    ios → android → mweb
+  Har bir client uchun maksimal 60 soniya timeout.
+  Agar 60s da javob bo'lmasa → keyingi clientga o'tiladi.
+
+  sleep_interval = 0 (kutish o'chirilgan — tezlash uchun)
+  retries = 3 (tez muvaffaqiyatsiz bo'lish)
 
 Istisnolar:
   PermanentDownloadError — video mavjud emas / geo-blocked / copyright
@@ -9,28 +19,9 @@ Istisnolar:
   YouTubePlayerError     — barcha player_client'lar muvaffaqiyatsiz
   Exception              — vaqtinchalik tarmoq / format xatoligi
 
-YouTube strategiyasi:
-  6 ta player_client navbatma-navbat sinab ko'riladi:
-    default → web → web_safari → web_embedded → android → ios
-  Har bir urinish:
-    - cookiefile ishlatiladi (agar mavjud bo'lsa)
-    - Proxy ishlatiladi (agar PROXY_URL o'rnatilgan bo'lsa)
-    - To'liq Chrome sarlavhalari
-    - retry=5, sleep_interval=1-3s
-    - geo_bypass=True, nocheckcertificate=True
-  "Failed to extract any player response" → keyingi client
-  Bot detection xatosi   → darhol YouTubeAuthError
-  Permanent xato         → darhol PermanentDownloadError
-
 Proxy fallback:
-  Agar PROXY_URL o'rnatilgan bo'lsa, avval proxy bilan urinadi.
-  Proxy xatosi bo'lsa → "Proxy failed, retrying without proxy" log yoziladi
-  va barcha per-client urinishlar proxysiz qaytariladi.
-
-Instagram/TikTok: faqat "default" client ishlatiladi.
-
-Sifat darajalari (QUALITY_PRESETS):
-  720p → 480p → 360p (handler sifatni tanlaydi)
+  PROXY_URL o'rnatilgan bo'lsa avval proxy bilan urinadi.
+  Proxy xatosi bo'lsa → proxysiz qayta urinadi.
 """
 
 import asyncio
@@ -54,17 +45,19 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────
 # YouTube player_client navbati
 # ──────────────────────────────────────────────────────────
+# 2025: YouTube web/web_safari/web_embedded uchun PO token talab qiladi.
+# ios / android / mweb — PO tokensiz ishlaydi → Railway server IP'da ham ishlashi mumkin.
+# tv_embedded qo'llab-quvvatlash cheklovlari uchun saqlandi.
 
 _YOUTUBE_PLAYER_CLIENTS: list[str] = [
-    # 2025: YouTube web clientlari PO token talab qiladi.
-    # ios / android / mweb / tv_embedded — PO tokensiz ishlaydi (eng ishonchli).
     "ios",          # ✅ PO token kerak emas — eng ishonchli
     "android",      # ✅ PO token kerak emas
     "mweb",         # ✅ Mobil veb
-    "tv_embedded",  # ✅ TV embedded — cheklovlarni chetlab o'tadi
-    "web",          # ⚠️  PO token kerak (cookies yordam berishi mumkin)
-    "default",      # yt-dlp ichki tanlov
+    "tv_embedded",  # ✅ Ayrim cheklangan videolar uchun
 ]
+
+# Har bir client urinishi uchun maksimal vaqt (soniyada)
+_CLIENT_TIMEOUT_SEC = 60
 
 # ──────────────────────────────────────────────────────────
 # Brauzer sarlavhalari — bot aniqlashdan himoya
@@ -116,15 +109,13 @@ def detect_platform(url: str) -> str:
 # ──────────────────────────────────────────────────────────
 
 QUALITY_PRESETS: list[tuple[str, str]] = [
-    # Format izoh:
-    #   bestvideo+bestaudio  — alohida video+audio (merge kerak, FFmpeg bor)
-    #   best[height<=Xp]     — birlashtirilgan stream (iOS/Android HLS uchun ideal)
-    #   best                 — oxirgi fallback, istalgan format
+    # ios/android/mweb clientlar HLS stream beradi — "best[height<=X]" ishonchli ishlaydi.
+    # bestvideo+bestaudio — agar alohida stream mavjud bo'lsa (web client uchun).
+    # best — oxirgi fallback, istalgan format.
     (
         "720p",
         (
             "bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]"
-            "/bestvideo[ext=mp4][height<=720]+bestaudio"
             "/bestvideo[height<=720]+bestaudio[ext=m4a]"
             "/bestvideo[height<=720]+bestaudio"
             "/best[ext=mp4][height<=720]"
@@ -137,7 +128,6 @@ QUALITY_PRESETS: list[tuple[str, str]] = [
         "480p",
         (
             "bestvideo[ext=mp4][height<=480]+bestaudio[ext=m4a]"
-            "/bestvideo[ext=mp4][height<=480]+bestaudio"
             "/bestvideo[height<=480]+bestaudio[ext=m4a]"
             "/bestvideo[height<=480]+bestaudio"
             "/best[ext=mp4][height<=480]"
@@ -150,7 +140,6 @@ QUALITY_PRESETS: list[tuple[str, str]] = [
         "360p",
         (
             "bestvideo[ext=mp4][height<=360]+bestaudio[ext=m4a]"
-            "/bestvideo[ext=mp4][height<=360]+bestaudio"
             "/bestvideo[height<=360]+bestaudio[ext=m4a]"
             "/bestvideo[height<=360]+bestaudio"
             "/best[ext=mp4][height<=360]"
@@ -189,14 +178,13 @@ _PLAYER_RESPONSE_KEYWORDS = (
     "unable to extract",
     "nsig extraction failed",
     "sign in to watch",
-    "po token",              # 2025: Proof of Origin token xatosi
-    "proof of origin",       # PO token
+    "po token",
+    "proof of origin",
     "this video is unavailable",
     "playback on other websites",
-    "sabotaged",             # YouTube sabotaj aniqlash
+    "sabotaged",
 )
 
-# Proxy xatolari — proxy ishlamasa proxysiz qayta uriniladi
 _PROXY_ERROR_KEYWORDS = (
     "proxy",
     "proxyerror",
@@ -206,8 +194,8 @@ _PROXY_ERROR_KEYWORDS = (
     "unable to connect to proxy",
     "connection refused",
     "proxy authentication",
-    "407",               # Proxy Authentication Required
-    "503",               # Service Unavailable (proxy-dan)
+    "407",
+    "503",
 )
 
 
@@ -282,46 +270,46 @@ def _cookie_opts() -> dict:
 def _build_opts(client: str, proxy: str | None = None) -> dict:
     """
     Berilgan player_client uchun to'liq yt-dlp sozlamalarini qaytaradi.
-    cookiefile, proxy, brauzer sarlavhalari, retry, geo_bypass va boshqalar.
 
-    proxy=None  → proxysiz ishlaydi
-    proxy=str   → berilgan proxy orqali ishlaydi, "Using proxy: ..." log yoziladi
+    Optimizatsiya (tezlik uchun):
+      - sleep_interval = 0  (kutish o'chirilgan)
+      - retries = 3         (tez muvaffaqiyatsiz bo'lish)
+      - socket_timeout = 30 (60 o'rniga)
     """
     opts: dict = {
         # ── Umumiy ──────────────────────────────────────────
         "quiet":                True,
         "no_warnings":          True,
-        "socket_timeout":       60,
-        "nocheckcertificate":   True,   # SSL sertifikat tekshiruvini o'chirish
-        "geo_bypass":           True,   # Geo-bloklarni bypass qilish
+        "socket_timeout":       30,    # 60 o'rniga — tez timeout
+        "nocheckcertificate":   True,
+        "geo_bypass":           True,
         "extract_flat":         False,
         "skip_download":        False,
         "prefer_free_formats":  False,  # MP4 ni WebM dan afzal ko'r
-        "check_formats":        "selected",  # Faqat tanlangan formatni tekshir
 
-        # ── Retry ────────────────────────────────────────────
-        "retries":              5,
-        "fragment_retries":     10,
-        "file_access_retries":  3,
-        "extractor_retries":    3,      # Extractor xatosida qayta urinish
+        # ── Retry (kamaytirildi — tez muvaffaqiyatsiz bo'lish) ──
+        "retries":              3,     # 5 o'rniga
+        "fragment_retries":     3,     # 10 o'rniga
+        "file_access_retries":  2,
+        "extractor_retries":    2,
 
-        # ── Anti-bot pauza ───────────────────────────────────
-        "sleep_interval":           1,
-        "max_sleep_interval":       3,
-        "sleep_interval_requests":  1,
+        # ── Sleep O'CHIRILGAN (kutishni kamaytirish) ─────────
+        # Railway server IP bloklanganida kutish befoyda — tez o'tish yaxshi.
+        "sleep_interval":           0,
+        "max_sleep_interval":       0,
+        "sleep_interval_requests":  0,
 
         # ── Brauzer sarlavhalari ──────────────────────────────
         "http_headers": _HEADERS,
 
         # ── YouTube player_client ─────────────────────────────
-        # Har bir client alohida yt-dlp instance'da sinab ko'riladi.
-        # ios/android/mweb: PO token talab qilmaydi (2025 uchun eng ishonchli).
         "extractor_args": {
             "youtube": {
                 "player_client": [client],
             }
         },
     }
+
     # Cookies qo'shish
     opts.update(_cookie_opts())
 
@@ -339,15 +327,14 @@ def _build_opts(client: str, proxy: str | None = None) -> dict:
 
 async def _video_per_client(url: str, fmt: str, proxy: str | None) -> str:
     """
-    Per-client loop: 6 ta YouTube player_client navbatma-navbat sinaydi.
-    proxy=str bo'lsa har bir urinishda berilgan proxy ishlatiladi.
-    proxy=None bo'lsa proxysiz ishlaydi.
+    Per-client loop: YouTube player_client'larni navbatma-navbat sinaydi.
+    Har bir urinish uchun maksimal _CLIENT_TIMEOUT_SEC soniya timeout.
 
     Ko'taradi:
       YouTubeAuthError       — bot taniqlash
       PermanentDownloadError — video mavjud emas/himoyalangan
       YouTubePlayerError     — barcha client'lar muvaffaqiyatsiz
-      RuntimeError("PROXY_FAILED:...") — proxy xatosi (tashqi wrapper ushlab, proxysiz retry)
+      RuntimeError("PROXY_FAILED:...") — proxy xatosi
       Exception              — boshqa vaqtinchalik xato
     """
     platform   = detect_platform(url)
@@ -370,44 +357,58 @@ async def _video_per_client(url: str, fmt: str, proxy: str | None) -> str:
             "merge_output_format": "mp4",
         })
 
-        proxy_tag = f" [proxy]" if proxy else ""
+        proxy_tag = " [proxy]" if proxy else ""
         logger.info(
             f"[YouTube:{client}{proxy_tag}] urinish {idx + 1}/{len(clients)}: {url[:55]}..."
             if is_youtube else f"[{client}{proxy_tag}] Yuklab olinmoqda: {url[:55]}..."
         )
 
+        # Default argument trick — closure xatosidan himoya
         result: dict = {"path": None, "error": None, "error_type": "temp"}
-        _opts   = opts
-        _result = result
 
-        def _run() -> None:
+        def _run(_o=opts, _r=result) -> None:
             try:
-                with yt_dlp.YoutubeDL(_opts) as ydl:
+                with yt_dlp.YoutubeDL(_o) as ydl:
                     info = ydl.extract_info(url, download=True)
                     if not info:
-                        _result["error"] = "Kontent ma'lumoti olinmadi"
+                        _r["error"] = "Kontent ma'lumoti olinmadi"
                         return
                     raw  = ydl.prepare_filename(info)
                     base = os.path.splitext(raw)[0]
                     mp4  = base + ".mp4"
                     if os.path.exists(mp4):
-                        _result["path"] = mp4
+                        _r["path"] = mp4
             except yt_dlp.utils.DownloadError as exc:
                 msg = str(exc)
-                _result["error"]      = msg
-                _result["error_type"] = _classify_error(msg)
+                _r["error"]      = msg
+                _r["error_type"] = _classify_error(msg)
             except Exception as exc:
-                _result["error"] = str(exc)
-                _result["error_type"] = _classify_error(str(exc))
+                _r["error"]      = str(exc)
+                _r["error_type"] = _classify_error(str(exc))
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _run)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _run),
+                timeout=float(_CLIENT_TIMEOUT_SEC),
+            )
+        except asyncio.TimeoutError:
+            _cleanup_prefix(DOWNLOAD_PATH, prefix)
+            logger.warning(
+                f"[{client}] {_CLIENT_TIMEOUT_SEC}s timeout — keyingi clientga o'tamiz"
+            )
+            last_error      = f"Timeout: {client} {_CLIENT_TIMEOUT_SEC}s da javob bermadi"
+            last_error_type = "temp"
+            continue
 
+        # ── Muvaffaqiyatli yuklab olindi ──────────────────
         if result["path"] and os.path.exists(result["path"]):
+            logger.info(f"[{client}] ✅ Muvaffaqiyatli: {result['path']}")
             return result["path"]
 
         found = _find_output_file(DOWNLOAD_PATH, prefix)
         if found:
+            logger.info(f"[{client}] ✅ Fayl topildi: {found}")
             return found
 
         error      = result["error"] or "Noma'lum xato"
@@ -417,7 +418,7 @@ async def _video_per_client(url: str, fmt: str, proxy: str | None) -> str:
 
         # ── Xato turlari ──────────────────────────────────
         if error_type == "bot":
-            logger.warning(f"[{client}] Bot taniqlash xatosi.")
+            logger.warning(f"[{client}] Bot taniqlash xatosi → darhol to'xtatildi")
             raise YouTubeAuthError(error)
 
         if error_type == "permanent":
@@ -425,13 +426,16 @@ async def _video_per_client(url: str, fmt: str, proxy: str | None) -> str:
             raise PermanentDownloadError(error)
 
         if error_type == "proxy":
-            # Proxy xatosi — tashqi wrapper proxysiz qayta urinadi
             logger.warning(f"[{client}] Proxy xatosi: {error[:80]}")
             raise RuntimeError(f"PROXY_FAILED:{error}")
 
         if error_type == "player":
             player_errors += 1
-            next_msg = "Keyingi clientga o'tamiz." if idx + 1 < len(clients) else "Barcha clientlar tugadi."
+            next_msg = (
+                "Keyingi clientga o'tamiz."
+                if idx + 1 < len(clients)
+                else "Barcha clientlar tugadi."
+            )
             logger.warning(f"[{client}] Player response xatosi ({player_errors}). {next_msg}")
         else:
             logger.warning(f"[{client}] Xato ({error_type}): {error[:80]}")
@@ -439,21 +443,17 @@ async def _video_per_client(url: str, fmt: str, proxy: str | None) -> str:
         last_error      = error
         last_error_type = error_type
 
-    if is_youtube and player_errors == len(clients):
+    # ── Barcha clientlar muvaffaqiyatsiz ──────────────────
+    if is_youtube:
         raise YouTubePlayerError(
-            "Barcha player_client urinishlari muvaffaqiyatsiz: "
-            f"{last_error[:100]}"
+            f"Barcha player_client urinishlari muvaffaqiyatsiz: {last_error[:100]}"
         )
-
-    if last_error_type == "player":
-        raise YouTubePlayerError(last_error)
-
     raise Exception(last_error)
 
 
 async def _audio_per_client(url: str, bitrate_num: str, proxy: str | None) -> str:
     """
-    Per-client loop: audio uchun. Proxy xatosi bo'lsa RuntimeError("PROXY_FAILED:...")
+    Per-client loop: audio uchun. Timeout va proxy fallback bilan.
     """
     platform   = detect_platform(url)
     is_youtube = platform == "youtube"
@@ -489,31 +489,39 @@ async def _audio_per_client(url: str, bitrate_num: str, proxy: str | None) -> st
         )
 
         result: dict = {"path": None, "error": None, "error_type": "temp"}
-        _opts   = opts
-        _result = result
 
-        def _run() -> None:
+        def _run(_o=opts, _r=result) -> None:
             try:
-                with yt_dlp.YoutubeDL(_opts) as ydl:
+                with yt_dlp.YoutubeDL(_o) as ydl:
                     info = ydl.extract_info(url, download=True)
                     if not info:
-                        _result["error"] = "Kontent ma'lumoti olinmadi"
+                        _r["error"] = "Kontent ma'lumoti olinmadi"
                         return
                     raw  = ydl.prepare_filename(info)
                     base = os.path.splitext(raw)[0]
                     mp3  = base + ".mp3"
                     if os.path.exists(mp3):
-                        _result["path"] = mp3
+                        _r["path"] = mp3
             except yt_dlp.utils.DownloadError as exc:
                 msg = str(exc)
-                _result["error"]      = msg
-                _result["error_type"] = _classify_error(msg)
+                _r["error"]      = msg
+                _r["error_type"] = _classify_error(msg)
             except Exception as exc:
-                _result["error"] = str(exc)
-                _result["error_type"] = _classify_error(str(exc))
+                _r["error"]      = str(exc)
+                _r["error_type"] = _classify_error(str(exc))
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _run)
+        try:
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _run),
+                timeout=float(_CLIENT_TIMEOUT_SEC),
+            )
+        except asyncio.TimeoutError:
+            _cleanup_prefix(DOWNLOAD_PATH, prefix)
+            logger.warning(f"[{client}] {_CLIENT_TIMEOUT_SEC}s timeout — keyingi client")
+            last_error      = f"Timeout: {client} javob bermadi"
+            last_error_type = "temp"
+            continue
 
         if result["path"] and os.path.exists(result["path"]):
             return result["path"]
@@ -536,14 +544,15 @@ async def _audio_per_client(url: str, bitrate_num: str, proxy: str | None) -> st
             raise RuntimeError(f"PROXY_FAILED:{error}")
         if error_type == "player":
             player_errors += 1
-            logger.warning(f"[{client}] Player response xatosi, keyingisiga o'tamiz")
+            logger.warning(f"[{client}] Player response xatosi → keyingisiga o'tamiz")
+        else:
+            logger.warning(f"[{client}] Xato ({error_type}): {error[:80]}")
 
         last_error      = error
         last_error_type = error_type
 
-    if is_youtube and player_errors > 0:
+    if is_youtube:
         raise YouTubePlayerError(last_error)
-
     raise Exception(last_error)
 
 
@@ -556,14 +565,7 @@ async def download_raw_video(url: str, fmt: str) -> str:
     Berilgan yt-dlp format matni bilan xom MP4 yuklab oladi.
 
     PROXY_URL o'rnatilgan bo'lsa avval proxy bilan urinadi.
-    Proxy xatosi bo'lsa → "Proxy failed, retrying without proxy" log yoziladi
-    va proxysiz qayta urinadi.
-
-    Ko'taradi:
-      YouTubeAuthError       — bot taniqlash (cookies kerak)
-      PermanentDownloadError — video mavjud emas/himoyalangan
-      YouTubePlayerError     — barcha client'lar muvaffaqiyatsiz
-      Exception              — boshqa vaqtinchalik xato
+    Proxy xatosi bo'lsa → proxysiz qayta urinadi.
     """
     os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
@@ -572,9 +574,7 @@ async def download_raw_video(url: str, fmt: str) -> str:
             return await _video_per_client(url, fmt, proxy=PROXY_URL)
         except RuntimeError as exc:
             if str(exc).startswith("PROXY_FAILED:"):
-                logger.warning(
-                    f"Proxy failed ({PROXY_URL}), retrying without proxy"
-                )
+                logger.warning(f"Proxy failed ({PROXY_URL}), retrying without proxy")
                 return await _video_per_client(url, fmt, proxy=None)
             raise
 
@@ -587,8 +587,6 @@ async def download_audio(url: str) -> str:
     PROXY_URL o'rnatilgan bo'lsa proxy bilan, xato bo'lsa proxysiz.
     """
     os.makedirs(DOWNLOAD_PATH, exist_ok=True)
-
-    # AUDIO_BITRATE: "128k" → "128"  (yt-dlp raqam kutadi)
     bitrate_num = AUDIO_BITRATE.rstrip("kK")
 
     if PROXY_URL:
@@ -596,9 +594,7 @@ async def download_audio(url: str) -> str:
             return await _audio_per_client(url, bitrate_num, proxy=PROXY_URL)
         except RuntimeError as exc:
             if str(exc).startswith("PROXY_FAILED:"):
-                logger.warning(
-                    f"Proxy failed ({PROXY_URL}), retrying without proxy"
-                )
+                logger.warning(f"Proxy failed ({PROXY_URL}), retrying without proxy")
                 return await _audio_per_client(url, bitrate_num, proxy=None)
             raise
 

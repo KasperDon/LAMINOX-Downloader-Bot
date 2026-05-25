@@ -110,7 +110,8 @@ async def _do_video(ref: Message, user, url: str, platform: str) -> None:
     status = await ref.answer(
         f"⏳ <b>Yuklab olinmoqda...</b>\n\n"
         f"{emoji} <b>{platform.capitalize()}</b>  →  📹 MP4{wm_label}\n\n"
-        f"🔄 Iltimos kuting..."
+        f"🔄 Iltimos kuting...\n"
+        f"<i>YouTube uchun ~30-60 soniya ketishi mumkin</i>"
     )
 
     raw_path: str | None  = None
