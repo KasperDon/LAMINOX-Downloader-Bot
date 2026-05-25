@@ -55,9 +55,20 @@ INVIDIOUS_INSTANCES: list[str] = [
     "https://iv.datura.network",
 ]
 
-# Progressive stream itag → balandlik (px)
-# Progressive = audio + video birlashtirilgan (FFmpeg merge kerak emas)
+# Progressive stream itag → balandlik (audio+video birlashtirilgan, merge kerak emas)
 _PROGRESSIVE_ITAGS: dict[int, int] = {22: 720, 59: 480, 18: 360, 17: 144}
+
+# Adaptive video itag → balandlik (faqat video, audio alohida)
+_ADAPTIVE_VIDEO_ITAGS: dict[int, int] = {
+    137: 1080, 248: 1080,   # 1080p (mp4 / webm)
+    136: 720,  247: 720,    # 720p
+    135: 480,  244: 480,    # 480p
+    134: 360,  243: 360,    # 360p
+    133: 240,  242: 240,    # 240p
+    160: 144,  278: 144,    # 144p
+    # AV1 / VP9
+    394: 144, 395: 240, 396: 360, 397: 480, 398: 720, 399: 1080,
+}
 
 # ──────────────────────────────────────────────────────────
 # YouTube player_client (yt-dlp fallback uchun)
@@ -289,70 +300,209 @@ def _fmt_to_max_height(fmt: str) -> int:
 # Invidious: YouTube video yuklab olish
 # ──────────────────────────────────────────────────────────
 
+def _safe_itag(s: dict) -> int:
+    """itag qiymatini xavfsiz int'ga aylantiradi (Invidious string qaytaradi)."""
+    try:
+        return int(s.get("itag") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _safe_int(val) -> int:
+    """Istalgan qiymatni xavfsiz int'ga aylantiradi."""
+    try:
+        return int(val or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _download_stream(session: aiohttp.ClientSession, url: str, out: str) -> bool:
+    """URL'dan faylni yuklab oladi. Muvaffaqiyatli bo'lsa True qaytaradi."""
+    if url.startswith("/"):
+        return False
+    try:
+        async with session.get(url, headers={"User-Agent": "Mozilla/5.0"}) as resp:
+            if resp.status not in (200, 206):
+                logger.debug(f"stream HTTP {resp.status}: {url[:60]}")
+                return False
+            with open(out, "wb") as f:
+                async for chunk in resp.content.iter_chunked(512 * 1024):
+                    f.write(chunk)
+        size = os.path.getsize(out) if os.path.exists(out) else 0
+        return size > 10_000
+    except Exception as e:
+        logger.debug(f"stream yuklab olish xatosi: {e}")
+        return False
+
+
 async def _invidious_video(video_id: str, max_height: int) -> str:
     """
     Invidious API orqali YouTube video yuklab oladi.
-    Railway IP bloklanmaydi — metadata Invidious serveridan olinadi.
+
+    1. formatStreams (progressive, audio+video birlashtirilgan) sinab ko'riladi
+    2. Agar yo'q → adaptiveFormats (alohida video+audio, FFmpeg bilan birlashtiradi)
+
+    Muhim tuzatish: itag Invidious'da STRING ("22") — int'ga aylantiramiz.
     """
     for instance in INVIDIOUS_INSTANCES:
-        api_url = f"{instance}/api/v1/videos/{video_id}?fields=formatStreams,title"
         try:
+            api_url = (
+                f"{instance}/api/v1/videos/{video_id}"
+                "?fields=formatStreams,adaptiveFormats,title"
+            )
             logger.info(f"[Invidious] {instance} → {video_id} (max {max_height}p)")
 
             async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
+                timeout=aiohttp.ClientTimeout(total=20)
             ) as session:
                 async with session.get(api_url) as resp:
                     if resp.status != 200:
-                        logger.debug(f"[Invidious] {instance}: HTTP {resp.status}")
+                        logger.warning(f"[Invidious] {instance}: HTTP {resp.status}")
                         continue
                     data = await resp.json()
 
-            # Eng yaxshi progressive stream (audio+video birlashtirilgan)
-            streams = data.get("formatStreams", [])
-            best, best_h = None, 0
-            for s in streams:
-                h = _PROGRESSIVE_ITAGS.get(s.get("itag", 0), 0)
-                if 0 < h <= max_height and h > best_h:
-                    best, best_h = s, h
+            # ── 1. Progressive stream (audio+video birlashtirilgan) ──────
+            prog_streams = data.get("formatStreams", [])
+            best_prog, best_prog_h = None, 0
+            for s in prog_streams:
+                h = _PROGRESSIVE_ITAGS.get(_safe_itag(s), 0)
+                if 0 < h <= max_height and h > best_prog_h:
+                    best_prog, best_prog_h = s, h
 
-            if not best:
-                logger.debug(f"[Invidious] {instance}: {max_height}p stream topilmadi")
+            if best_prog:
+                url_prog = best_prog.get("url", "")
+                if url_prog.startswith("/"):
+                    url_prog = instance + url_prog
+                if url_prog:
+                    fid = uuid.uuid4().hex[:10]
+                    out = os.path.join(DOWNLOAD_PATH, f"vid_{fid}.mp4")
+                    os.makedirs(DOWNLOAD_PATH, exist_ok=True)
+                    logger.info(
+                        f"[Invidious] progressive {best_prog_h}p yuklanmoqda..."
+                    )
+                    dl_sess = aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=300, sock_read=120)
+                    )
+                    async with dl_sess as session:
+                        ok = await _download_stream(session, url_prog, out)
+                    if ok:
+                        size = os.path.getsize(out)
+                        logger.info(f"✅ [Invidious] progressive {size//1024} KB")
+                        return out
+                    try:
+                        os.remove(out)
+                    except Exception:
+                        pass
+            else:
+                logger.debug(
+                    f"[Invidious] {instance}: formatStreams bo'sh yoki mos kelmaди"
+                )
+
+            # ── 2. Adaptive stream (video + audio alohida, FFmpeg merge) ──
+            adaptive = data.get("adaptiveFormats", [])
+
+            # Eng yaxshi video stream
+            best_vid, best_vid_h = None, 0
+            for s in adaptive:
+                if "video" not in s.get("type", ""):
+                    continue
+                h = _ADAPTIVE_VIDEO_ITAGS.get(_safe_itag(s), 0)
+                if 0 < h <= max_height and h > best_vid_h:
+                    best_vid, best_vid_h = s, h
+
+            # Eng yaxshi audio stream (m4a birinchi)
+            audio_streams = [
+                s for s in adaptive
+                if "audio" in s.get("type", "")
+            ]
+            # m4a/mp4 audio'ni afzal ko'ramiz (mp4 bilan birlashtirish osonroq)
+            audio_streams.sort(
+                key=lambda s: (
+                    "mp4" in s.get("type", ""),
+                    _safe_int(s.get("bitrate", 0)),
+                ),
+                reverse=True,
+            )
+            best_aud = audio_streams[0] if audio_streams else None
+
+            if not best_vid or not best_aud:
+                logger.warning(
+                    f"[Invidious] {instance}: adaptive stream topilmadi "
+                    f"(video={'ok' if best_vid else 'yo\'q'}, "
+                    f"audio={'ok' if best_aud else 'yo\'q'})"
+                )
                 continue
 
-            stream_url = best.get("url", "")
-            if not stream_url:
-                continue
-            # Relative URL'ni absolute'ga aylantirish
-            if stream_url.startswith("/"):
-                stream_url = instance + stream_url
+            vid_url = best_vid.get("url", "")
+            aud_url = best_aud.get("url", "")
+            if vid_url.startswith("/"):
+                vid_url = instance + vid_url
+            if aud_url.startswith("/"):
+                aud_url = instance + aud_url
 
-            fid = uuid.uuid4().hex[:10]
-            out = os.path.join(DOWNLOAD_PATH, f"vid_{fid}.mp4")
+            fid     = uuid.uuid4().hex[:10]
+            vid_tmp = os.path.join(DOWNLOAD_PATH, f"vid_{fid}_v.mp4")
+            aud_tmp = os.path.join(DOWNLOAD_PATH, f"vid_{fid}_a.m4a")
+            out     = os.path.join(DOWNLOAD_PATH, f"vid_{fid}.mp4")
             os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
-            logger.info(f"[Invidious] {best_h}p yuklab olinmoqda ({instance})...")
+            logger.info(
+                f"[Invidious] adaptive {best_vid_h}p yuklanmoqda "
+                f"({instance})..."
+            )
 
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=300, sock_read=120)
-            ) as session:
-                async with session.get(
-                    stream_url,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                ) as resp:
-                    if resp.status not in (200, 206):
-                        logger.warning(f"[Invidious] stream HTTP {resp.status}")
-                        continue
-                    with open(out, "wb") as f:
-                        async for chunk in resp.content.iter_chunked(512 * 1024):
-                            f.write(chunk)
+            dl_timeout = aiohttp.ClientTimeout(total=300, sock_read=120)
+            async with aiohttp.ClientSession(timeout=dl_timeout) as session:
+                vid_ok = await _download_stream(session, vid_url, vid_tmp)
+                aud_ok = await _download_stream(session, aud_url, aud_tmp)
+
+            if not vid_ok or not aud_ok:
+                logger.warning(
+                    f"[Invidious] adaptive yuklab olish xatosi "
+                    f"(video={'ok' if vid_ok else 'fail'}, "
+                    f"audio={'ok' if aud_ok else 'fail'})"
+                )
+                for p in (vid_tmp, aud_tmp):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                continue
+
+            # FFmpeg bilan birlashtirish
+            logger.info("[Invidious] FFmpeg merge qilinmoqda...")
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-i", vid_tmp, "-i", aud_tmp,
+                "-c:v", "copy", "-c:a", "copy",
+                "-movflags", "+faststart",
+                "-y", out,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=120)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.warning("[Invidious] FFmpeg merge timeout")
+                for p in (vid_tmp, aud_tmp, out):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
+                continue
+            finally:
+                for p in (vid_tmp, aud_tmp):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
             size = os.path.getsize(out) if os.path.exists(out) else 0
             if size > 50_000:
-                logger.info(f"✅ [Invidious] {size // 1024} KB — {instance}")
+                logger.info(f"✅ [Invidious] adaptive {size//1024} KB")
                 return out
 
-            logger.warning(f"[Invidious] Fayl juda kichik ({size} bytes), keyingisiga o'tamiz")
             try:
                 os.remove(out)
             except Exception:
@@ -400,8 +550,10 @@ async def _invidious_audio(video_id: str, bitrate: str) -> str:
                 logger.debug(f"[Invidious audio] {instance}: audio stream topilmadi")
                 continue
 
-            # Eng yuqori bitrate'li audio
-            audio_streams.sort(key=lambda x: x.get("bitrate", 0), reverse=True)
+            # Eng yuqori bitrate'li audio (bitrate string bo'lishi mumkin)
+            audio_streams.sort(
+                key=lambda x: _safe_int(x.get("bitrate", 0)), reverse=True
+            )
             best = audio_streams[0]
 
             stream_url = best.get("url", "")
