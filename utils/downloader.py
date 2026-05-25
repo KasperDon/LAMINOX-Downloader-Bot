@@ -66,11 +66,13 @@ PIPED_INSTANCES: list[str] = [
 
 # Cobalt API instance'lari (github.com/imputnet/cobalt)
 # Cobalt YouTube'ni o'z serverlaridan yuklaydi — Railway IP bloklangan bo'lsa ham ishlaydi
+# ssl=False ishlatiladi — community instance'larda sertifikat muammolari bo'lishi mumkin
 COBALT_INSTANCES: list[str] = [
-    "https://cobalt.api.timelessnesses.me",
-    "https://cobalt.urdh.dev",
-    "https://cobalt.drgns.space",
-    "https://api.cobalt.tools",               # Rate-limit bor, oxirgi sinab ko'riladi
+    "https://cobalt.api.timelessnesses.me",  # ssl: o'z-imzolangan, ssl=False bilan ishlaydi
+    "https://cobalt.drgns.space",            # ssl: muddati o'tgan, ssl=False bilan ishlaydi
+    "https://cobaltapi.void.cat",            # community instance
+    "https://co.wuk.sh",                     # community instance
+    "https://api.cobalt.tools",              # rasmiy, oxirgi sinab ko'riladi
 ]
 
 # Progressive stream itag → balandlik (audio+video birlashtirilgan, merge kerak emas)
@@ -370,10 +372,12 @@ async def _invidious_video(video_id: str, max_height: int) -> str:
             )
             logger.info(f"[Invidious] {instance} → {video_id} (max {max_height}p)")
 
+            # PROXY_URL orqali so'rov — Railway IP bloki aylanib o'tiladi
+            _api_proxy = PROXY_URL or None
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20)
             ) as session:
-                async with session.get(api_url) as resp:
+                async with session.get(api_url, proxy=_api_proxy) as resp:
                     if resp.status != 200:
                         logger.warning(f"[Invidious] {instance}: HTTP {resp.status}")
                         continue
@@ -573,11 +577,15 @@ async def _invidious_audio(video_id: str, bitrate: str) -> str:
             api_url = f"{instance}/api/v1/videos/{video_id}?fields=adaptiveFormats"
             logger.info(f"[Invidious audio] {instance} → {video_id}")
 
+            _api_proxy = PROXY_URL or None
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as session:
-                async with session.get(api_url) as resp:
+                async with session.get(api_url, proxy=_api_proxy) as resp:
                     if resp.status != 200:
+                        logger.warning(
+                            f"[Invidious audio] {instance}: HTTP {resp.status}"
+                        )
                         continue
                     data = await resp.json()
 
@@ -890,10 +898,11 @@ async def _piped_video(video_id: str, max_height: int) -> str:
             api_url = f"{instance}/streams/{video_id}"
             logger.info(f"[Piped] {instance} → {video_id} (max {max_height}p)")
 
+            _api_proxy = PROXY_URL or None
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=15)
             ) as session:
-                async with session.get(api_url) as resp:
+                async with session.get(api_url, proxy=_api_proxy) as resp:
                     if resp.status != 200:
                         logger.warning(f"[Piped] {instance}: HTTP {resp.status}")
                         continue
@@ -1074,12 +1083,13 @@ async def _cobalt_video(video_id: str, max_height: int) -> str:
     """
     youtube_url = f"https://www.youtube.com/watch?v={video_id}"
     quality     = _cobalt_quality(max_height)
+    # Minimal payload — ba'zi instance'lar noto'g'ri fieldlarni rad etadi
     payload     = {
-        "url":           youtube_url,
-        "videoQuality":  quality,
-        "downloadMode":  "auto",
-        "filenameStyle": "basic",
+        "url":          youtube_url,
+        "videoQuality": quality,
+        "downloadMode": "auto",
     }
+    _api_proxy = PROXY_URL or None
 
     for instance in COBALT_INSTANCES:
         try:
@@ -1092,12 +1102,21 @@ async def _cobalt_video(video_id: str, max_height: int) -> str:
                     instance,
                     json=payload,
                     headers=_COBALT_HEADERS,
+                    proxy=_api_proxy,
+                    ssl=False,          # community instance'larda sertifikat muammolari
                 ) as resp:
                     if resp.status == 429:
                         logger.warning(f"[Cobalt] {instance}: rate limit (429)")
                         continue
                     if resp.status != 200:
-                        logger.warning(f"[Cobalt] {instance}: HTTP {resp.status}")
+                        body = ""
+                        try:
+                            body = (await resp.text())[:120]
+                        except Exception:
+                            pass
+                        logger.warning(
+                            f"[Cobalt] {instance}: HTTP {resp.status} — {body}"
+                        )
                         continue
                     ct = resp.headers.get("Content-Type", "")
                     if "json" not in ct.lower():
@@ -1105,17 +1124,21 @@ async def _cobalt_video(video_id: str, max_height: int) -> str:
                             f"[Cobalt] {instance}: JSON kutildi, lekin '{ct}' keldi"
                         )
                         continue
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
 
             status = data.get("status", "")
             if status == "error":
-                code = data.get("error", {}).get("code", "unknown")
+                err_obj = data.get("error", data.get("text", ""))
+                if isinstance(err_obj, dict):
+                    code = err_obj.get("code", str(err_obj))
+                else:
+                    code = str(err_obj)
                 logger.warning(f"[Cobalt] {instance}: API xatosi → {code}")
                 continue
 
             dl_url = data.get("url")
             if not dl_url:
-                logger.warning(f"[Cobalt] {instance}: javobda URL yo'q ({status})")
+                logger.warning(f"[Cobalt] {instance}: javobda URL yo'q ({status}) — {data}")
                 continue
 
             logger.info(f"[Cobalt] {instance}: {status} → yuklab olinmoqda...")
@@ -1154,15 +1177,15 @@ async def _cobalt_audio(video_id: str, bitrate: str) -> str:
     Cobalt API orqali YouTube audio yuklab oladi (MP3).
     bitrate: "128k" formatida.
     """
-    youtube_url  = f"https://www.youtube.com/watch?v={video_id}"
-    bitrate_num  = bitrate.rstrip("kK")
-    payload      = {
+    youtube_url = f"https://www.youtube.com/watch?v={video_id}"
+    bitrate_num = bitrate.rstrip("kK")
+    payload     = {
         "url":          youtube_url,
         "downloadMode": "audio",
         "audioFormat":  "mp3",
         "audioBitrate": bitrate_num,
-        "filenameStyle": "basic",
     }
+    _api_proxy = PROXY_URL or None
 
     for instance in COBALT_INSTANCES:
         try:
@@ -1175,12 +1198,21 @@ async def _cobalt_audio(video_id: str, bitrate: str) -> str:
                     instance,
                     json=payload,
                     headers=_COBALT_HEADERS,
+                    proxy=_api_proxy,
+                    ssl=False,
                 ) as resp:
                     if resp.status == 429:
                         logger.warning(f"[Cobalt audio] {instance}: rate limit")
                         continue
                     if resp.status != 200:
-                        logger.warning(f"[Cobalt audio] {instance}: HTTP {resp.status}")
+                        body = ""
+                        try:
+                            body = (await resp.text())[:120]
+                        except Exception:
+                            pass
+                        logger.warning(
+                            f"[Cobalt audio] {instance}: HTTP {resp.status} — {body}"
+                        )
                         continue
                     ct = resp.headers.get("Content-Type", "")
                     if "json" not in ct.lower():
@@ -1188,17 +1220,23 @@ async def _cobalt_audio(video_id: str, bitrate: str) -> str:
                             f"[Cobalt audio] {instance}: JSON kutildi, lekin '{ct}'"
                         )
                         continue
-                    data = await resp.json()
+                    data = await resp.json(content_type=None)
 
             status = data.get("status", "")
             if status == "error":
-                code = data.get("error", {}).get("code", "unknown")
+                err_obj = data.get("error", data.get("text", ""))
+                if isinstance(err_obj, dict):
+                    code = err_obj.get("code", str(err_obj))
+                else:
+                    code = str(err_obj)
                 logger.warning(f"[Cobalt audio] {instance}: API xatosi → {code}")
                 continue
 
             dl_url = data.get("url")
             if not dl_url:
-                logger.warning(f"[Cobalt audio] {instance}: URL yo'q ({status})")
+                logger.warning(
+                    f"[Cobalt audio] {instance}: URL yo'q ({status}) — {data}"
+                )
                 continue
 
             logger.info(f"[Cobalt audio] yuklab olinmoqda ({status})...")
