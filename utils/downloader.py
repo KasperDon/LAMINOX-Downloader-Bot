@@ -377,10 +377,8 @@ async def download_raw_video(url: str, fmt: str) -> str:
 
         if error_type == "player":
             player_errors += 1
-            logger.warning(
-                f"[{client}] Player response xatosi ({player_errors}). "
-                f"{'Keyingi clientga o'tamiz.' if idx + 1 < len(clients) else 'Barcha clientlar tugadi.'}"
-            )
+            next_msg = "Keyingi clientga o'tamiz." if idx + 1 < len(clients) else "Barcha clientlar tugadi."
+            logger.warning(f"[{client}] Player response xatosi ({player_errors}). {next_msg}")
         else:
             logger.warning(f"[{client}] Xato ({error_type}): {error[:80]}")
 
