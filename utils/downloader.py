@@ -100,15 +100,16 @@ _ADAPTIVE_VIDEO_ITAGS: dict[int, int] = {
 # ──────────────────────────────────────────────────────────
 
 # MUHIM: tv_embedded va tv — PO token talab qilmaydi, bot detection aylanib o'tadi.
-# Shu ikkisi birinchi — ko'p cheklangan videolarda ishlaydi.
+# web — bgutil bilan PO token oladi (bgutil server port 4416 da ishlaydi).
 _YOUTUBE_PLAYER_CLIENTS: list[str] = [
-    "tv_embedded",       # 1: TV embedded — PO token kerak emas, cheklangan videoları ham
-    "tv",                # 2: TV Sapphire — PO token kerak emas
-    "ios",               # 3: iOS client — PO token kerak emas
-    "android",           # 4: Android
-    "web_creator",       # 5: YouTube Studio client
-    "android_vr",        # 6: VR client
-    "mweb",              # 7: Mobil veb
+    "web",               # 1: bgutil PO token bilan — keng qo'llab-quvvatlash
+    "tv_embedded",       # 2: TV embedded — PO token kerak emas
+    "tv",                # 3: TV Sapphire — PO token kerak emas
+    "ios",               # 4: iOS client — PO token kerak emas
+    "android",           # 5: Android
+    "web_creator",       # 6: YouTube Studio client
+    "android_vr",        # 7: VR client
+    "mweb",              # 8: Mobil veb
 ]
 
 _CLIENT_TIMEOUT_SEC = 90  # har bir client uchun (sekundda)

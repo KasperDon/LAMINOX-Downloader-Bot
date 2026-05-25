@@ -14,6 +14,8 @@ import asyncio
 import logging
 import os
 import sys
+import urllib.request
+import urllib.error
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -56,6 +58,16 @@ def _startup_checks() -> None:
 
     # yt-dlp versiyasi
     logger.info(f"📦 yt-dlp versiya: {yt_dlp.version.__version__}")
+
+    # bgutil PO token server tekshiruvi (port 4416)
+    try:
+        urllib.request.urlopen("http://127.0.0.1:4416/", timeout=2)
+        logger.info("✅ bgutil PO token server ishlamoqda (port 4416)")
+    except urllib.error.HTTPError as e:
+        # HTTP javob keldi = server ishlamoqda (404 ham yaxshi)
+        logger.info(f"✅ bgutil PO token server ishlamoqda (port 4416, HTTP {e.code})")
+    except Exception as e:
+        logger.warning(f"⚠️  bgutil PO token server topilmadi (port 4416): {e}")
 
     # Cookies holati
     if YOUTUBE_COOKIES_ENABLED:
