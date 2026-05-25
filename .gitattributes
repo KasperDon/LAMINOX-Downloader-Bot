@@ -1,0 +1,8 @@
+# Barcha matn fayllarini Unix (LF) sifatida saqlash — Docker uchun muhim
+* text=auto eol=lf
+
+# Ikkilik fayllar
+*.png binary
+*.jpg binary
+*.ico binary
+*.db  binary

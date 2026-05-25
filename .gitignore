@@ -1,0 +1,25 @@
+# Environment
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# Temp yuklamalar
+downloads/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

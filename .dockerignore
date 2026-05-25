@@ -1,0 +1,15 @@
+.env
+.git
+.gitignore
+.dockerignore
+__pycache__
+*.pyc
+*.pyo
+*.log
+logs/
+downloads/
+*.db
+*.sqlite3
+.DS_Store
+Thumbs.db
+README.md

@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./database.db:/app/database.db
+      - ./logs:/app/logs
+      - ./downloads:/app/downloads
