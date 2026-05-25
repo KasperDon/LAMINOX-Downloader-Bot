@@ -299,7 +299,11 @@ def _build_opts(client: str, proxy: str | None = None) -> dict:
         "sleep_interval_requests": 0,
         "http_headers":         _HEADERS,
         "extractor_args": {
+            # YouTube player client
             "youtube": {"player_client": [client]},
+            # bgutil PO token server (port 4416 da ishlaydi)
+            # YouTube 2024-yildan PO token talab qiladi — bgutil uni real hosil qiladi
+            "youtubepot-bgutilhttp": {"base_url": ["http://127.0.0.1:4416"]},
         },
     }
     opts.update(_cookie_opts())
