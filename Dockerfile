@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
         git \
     && rm -rf /var/lib/apt/lists/*
 
-# bgutil-ytdlp-pot-provider server qurish
+# bgutil-ytdlp-pot-provider server qurish (npm install fix)
 # YouTube 2024-yildan PO token talab qiladi — bu server uni hosil qiladi.
 # Port 4416 da ishlaydi. bot.py ishga tushishdan oldin start bo'ladi.
 RUN git clone --depth=1 \
