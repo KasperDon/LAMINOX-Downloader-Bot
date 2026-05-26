@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 # Port 4416 da ishlaydi. bot.py ishga tushishdan oldin start bo'ladi.
 RUN git clone --depth=1 \
         https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /bgutil \
-    && cd /bgutil && npm ci && npx tsc \
+    && cd /bgutil && npm install && npx tsc \
     && echo '✅ bgutil Node.js server qurildi'
 
 WORKDIR /app
