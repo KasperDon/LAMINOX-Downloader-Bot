@@ -1,4 +1,5 @@
 FROM python:3.12-slim
+ARG CACHE_BUST=1
 
 # 1. Avval curl o'rnatamiz (NodeSource setup uchun kerak)
 # 2. NodeSource orqali Node.js 20 LTS qo'shamiz (bgutil uchun)
